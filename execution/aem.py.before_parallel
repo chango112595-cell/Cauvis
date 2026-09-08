@@ -1,0 +1,737 @@
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable
+
+from execution.scheduler import WorkerScheduler
+from execution.workers import (
+    WorkerResult,
+    WorkerTask,
+    WorkerTaskType,
+)
+
+
+class AEMStrategy(str, Enum):
+    """
+    Aurora-inspired Execution Method strategies.
+
+    These describe HOW Cauvis should execute work.
+    """
+
+    SEQUENTIAL = "sequential"
+    PARALLEL = "parallel"
+    PRIORITY = "priority"
+    RETRY = "retry"
+    FALLBACK = "fallback"
+    PIPELINE = "pipeline"
+    DEPENDENCY_GRAPH = "dependency_graph"
+    ADAPTIVE = "adaptive"
+
+
+@dataclass
+class AEMTask:
+    """
+    A task submitted to an AEM strategy.
+
+    Each AEMTask eventually becomes a WorkerTask.
+    """
+
+    name: str
+
+    payload: Any = None
+
+    priority: int = 100
+
+    task_type: WorkerTaskType = WorkerTaskType.GENERAL
+
+    required_capabilities: set[str] = field(
+        default_factory=set
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    def to_worker_task(self) -> WorkerTask:
+        """
+        Convert the AEM task into the WorkerTask format
+        understood by the Cauvis worker scheduler.
+        """
+
+        return WorkerTask(
+            name=self.name,
+            payload=self.payload,
+            task_type=self.task_type,
+            priority=self.priority,
+            required_capabilities=set(
+                self.required_capabilities
+            ),
+            metadata=dict(self.metadata),
+        )
+
+
+@dataclass
+class AEMResult:
+    """
+    Standard result returned by an AEM execution method.
+    """
+
+    success: bool
+
+    strategy: AEMStrategy
+
+    completed_tasks: int
+
+    total_tasks: int
+
+    results: list[WorkerResult] = field(
+        default_factory=list
+    )
+
+    error: str | None = None
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+class AEM:
+    """
+    Base Aurora-inspired Execution Method.
+
+    An AEM determines HOW tasks should be orchestrated.
+
+    WorkerScheduler determines WHICH worker should
+    perform each task.
+    """
+
+    name: AEMStrategy = AEMStrategy.SEQUENTIAL
+
+    def __init__(
+        self,
+        scheduler: WorkerScheduler,
+    ):
+        self.scheduler = scheduler
+
+    def execute(
+        self,
+        tasks: list[AEMTask],
+    ) -> AEMResult:
+        raise NotImplementedError(
+            "AEM strategies must implement execute()."
+        )
+
+
+class SequentialAEM(AEM):
+    """
+    Execute tasks one at a time in the supplied order.
+    """
+
+    name = AEMStrategy.SEQUENTIAL
+
+    def execute(
+        self,
+        tasks: list[AEMTask],
+    ) -> AEMResult:
+
+        if not tasks:
+            return AEMResult(
+                success=True,
+                strategy=self.name,
+                completed_tasks=0,
+                total_tasks=0,
+            )
+
+        results: list[WorkerResult] = []
+
+        for task in tasks:
+
+            dispatch_result = self.scheduler.dispatch(
+                task.to_worker_task()
+            )
+
+            if dispatch_result.worker_result is None:
+                return AEMResult(
+                    success=False,
+                    strategy=self.name,
+                    completed_tasks=len(results),
+                    total_tasks=len(tasks),
+                    results=results,
+                    error=(
+                        dispatch_result.error
+                        or "Worker dispatch failed."
+                    ),
+                )
+
+            worker_result = (
+                dispatch_result.worker_result
+            )
+
+            results.append(worker_result)
+
+            if not worker_result.success:
+                return AEMResult(
+                    success=False,
+                    strategy=self.name,
+                    completed_tasks=len(results) - 1,
+                    total_tasks=len(tasks),
+                    results=results,
+                    error=(
+                        worker_result.error
+                        or "Worker execution failed."
+                    ),
+                )
+
+        return AEMResult(
+            success=True,
+            strategy=self.name,
+            completed_tasks=len(results),
+            total_tasks=len(tasks),
+            results=results,
+        )
+
+
+class PriorityAEM(AEM):
+    """
+    Execute tasks from highest priority to lowest priority.
+
+    Higher priority numbers execute first.
+    """
+
+    name = AEMStrategy.PRIORITY
+
+    def execute(
+        self,
+        tasks: list[AEMTask],
+    ) -> AEMResult:
+
+        ordered_tasks = sorted(
+            tasks,
+            key=lambda task: task.priority,
+            reverse=True,
+        )
+
+        results: list[WorkerResult] = []
+
+        for task in ordered_tasks:
+
+            dispatch_result = self.scheduler.dispatch(
+                task.to_worker_task()
+            )
+
+            if dispatch_result.worker_result is None:
+                return AEMResult(
+                    success=False,
+                    strategy=self.name,
+                    completed_tasks=len(results),
+                    total_tasks=len(tasks),
+                    results=results,
+                    error=(
+                        dispatch_result.error
+                        or "Worker dispatch failed."
+                    ),
+                )
+
+            worker_result = (
+                dispatch_result.worker_result
+            )
+
+            results.append(worker_result)
+
+            if not worker_result.success:
+                return AEMResult(
+                    success=False,
+                    strategy=self.name,
+                    completed_tasks=len(results) - 1,
+                    total_tasks=len(tasks),
+                    results=results,
+                    error=(
+                        worker_result.error
+                        or "Worker execution failed."
+                    ),
+                )
+
+        return AEMResult(
+            success=True,
+            strategy=self.name,
+            completed_tasks=len(results),
+            total_tasks=len(tasks),
+            results=results,
+            metadata={
+                "priority_order": [
+                    task.priority
+                    for task in ordered_tasks
+                ]
+            },
+        )
+
+
+class RetryAEM(AEM):
+    """
+    Retry failed worker tasks a controlled number of times.
+
+    A task is only successful if an actual worker
+    execution succeeds.
+    """
+
+    name = AEMStrategy.RETRY
+
+    def __init__(
+        self,
+        scheduler: WorkerScheduler,
+        max_retries: int = 2,
+    ):
+        super().__init__(scheduler)
+
+        if max_retries < 0:
+            raise ValueError(
+                "max_retries cannot be negative."
+            )
+
+        self.max_retries = max_retries
+
+    def execute(
+        self,
+        tasks: list[AEMTask],
+    ) -> AEMResult:
+
+        if not tasks:
+            return AEMResult(
+                success=True,
+                strategy=self.name,
+                completed_tasks=0,
+                total_tasks=0,
+                metadata={
+                    "max_retries": self.max_retries,
+                },
+            )
+
+        results: list[WorkerResult] = []
+
+        retry_counts: dict[str, int] = {}
+
+        for task in tasks:
+
+            worker_task = task.to_worker_task()
+
+            attempts = 0
+
+            successful_result: WorkerResult | None = None
+
+            last_result: WorkerResult | None = None
+
+            while attempts <= self.max_retries:
+
+                dispatch_result = (
+                    self.scheduler.dispatch(
+                        worker_task
+                    )
+                )
+
+                if (
+                    dispatch_result.worker_result
+                    is None
+                ):
+                    return AEMResult(
+                        success=False,
+                        strategy=self.name,
+                        completed_tasks=len(results),
+                        total_tasks=len(tasks),
+                        results=results,
+                        error=(
+                            dispatch_result.error
+                            or "Worker dispatch failed."
+                        ),
+                        metadata={
+                            "max_retries": (
+                                self.max_retries
+                            ),
+                            "retry_counts": retry_counts,
+                        },
+                    )
+
+                worker_result = (
+                    dispatch_result.worker_result
+                )
+
+                last_result = worker_result
+
+                if worker_result.success:
+                    successful_result = worker_result
+                    break
+
+                attempts += 1
+
+            retry_counts[task.name] = attempts
+
+            if successful_result is not None:
+                results.append(
+                    successful_result
+                )
+                continue
+
+            error = (
+                last_result.error
+                if last_result is not None
+                else "Worker execution failed."
+            )
+
+            return AEMResult(
+                success=False,
+                strategy=self.name,
+                completed_tasks=len(results),
+                total_tasks=len(tasks),
+                results=results,
+                error=error,
+                metadata={
+                    "max_retries": self.max_retries,
+                    "retry_counts": retry_counts,
+                },
+            )
+
+        return AEMResult(
+            success=True,
+            strategy=self.name,
+            completed_tasks=len(results),
+            total_tasks=len(tasks),
+            results=results,
+            metadata={
+                "max_retries": self.max_retries,
+                "retry_counts": retry_counts,
+            },
+        )
+
+
+class FallbackAEM(AEM):
+    """
+    Try alternate workers when the currently selected
+    worker fails.
+
+    This strategy does NOT retry the same worker.
+
+    Instead, it discovers all workers capable of handling
+    the task and attempts them in scheduler-selected order.
+    """
+
+    name = AEMStrategy.FALLBACK
+
+    def execute(
+        self,
+        tasks: list[AEMTask],
+    ) -> AEMResult:
+
+        if not tasks:
+            return AEMResult(
+                success=True,
+                strategy=self.name,
+                completed_tasks=0,
+                total_tasks=0,
+            )
+
+        results: list[WorkerResult] = []
+
+        fallback_history: dict[
+            str,
+            list[str],
+        ] = {}
+
+        for task in tasks:
+
+            worker_task = task.to_worker_task()
+
+            candidates = (
+                self.scheduler.find_candidates(
+                    worker_task
+                )
+            )
+
+            if not candidates:
+                return AEMResult(
+                    success=False,
+                    strategy=self.name,
+                    completed_tasks=len(results),
+                    total_tasks=len(tasks),
+                    results=results,
+                    error=(
+                        "No capable workers are available "
+                        f"for task: {task.name}"
+                    ),
+                    metadata={
+                        "fallback_history": (
+                            fallback_history
+                        ),
+                    },
+                )
+
+            attempted_workers: list[str] = []
+
+            successful_result: WorkerResult | None = None
+
+            last_error: str | None = None
+
+            for worker in candidates:
+
+                attempted_workers.append(
+                    worker.name
+                )
+
+                dispatch_result = (
+                    self.scheduler.dispatch(
+                        worker_task
+                    )
+                )
+
+                if (
+                    dispatch_result.worker_result
+                    is None
+                ):
+                    last_error = (
+                        dispatch_result.error
+                        or "Worker dispatch failed."
+                    )
+                    continue
+
+                worker_result = (
+                    dispatch_result.worker_result
+                )
+
+                if worker_result.success:
+                    successful_result = (
+                        worker_result
+                    )
+                    break
+
+                last_error = (
+                    worker_result.error
+                    or "Worker execution failed."
+                )
+
+            fallback_history[task.name] = (
+                attempted_workers
+            )
+
+            if successful_result is None:
+                return AEMResult(
+                    success=False,
+                    strategy=self.name,
+                    completed_tasks=len(results),
+                    total_tasks=len(tasks),
+                    results=results,
+                    error=(
+                        last_error
+                        or "All fallback workers failed."
+                    ),
+                    metadata={
+                        "fallback_history": (
+                            fallback_history
+                        ),
+                    },
+                )
+
+            results.append(
+                successful_result
+            )
+
+        return AEMResult(
+            success=True,
+            strategy=self.name,
+            completed_tasks=len(results),
+            total_tasks=len(tasks),
+            results=results,
+            metadata={
+                "fallback_history": fallback_history,
+            },
+        )
+
+
+@dataclass
+class AEMDefinition:
+    """
+    Registered description of an AEM strategy.
+    """
+
+    name: AEMStrategy
+
+    description: str
+
+    executor_factory: Callable[
+        [WorkerScheduler],
+        AEM
+    ]
+
+    enabled: bool = True
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+class AEMRegistry:
+    """
+    Registry for Cauvis AEM strategies.
+
+    Only real strategies are registered.
+    """
+
+    def __init__(
+        self,
+        scheduler: WorkerScheduler,
+    ):
+        self.scheduler = scheduler
+
+        self._definitions: dict[
+            AEMStrategy,
+            AEMDefinition,
+        ] = {}
+
+        self._register_defaults()
+
+    def _register_defaults(self) -> None:
+
+        self.register(
+            AEMDefinition(
+                name=AEMStrategy.SEQUENTIAL,
+                description=(
+                    "Execute tasks sequentially "
+                    "in a controlled order."
+                ),
+                executor_factory=SequentialAEM,
+            )
+        )
+
+        self.register(
+            AEMDefinition(
+                name=AEMStrategy.PRIORITY,
+                description=(
+                    "Execute tasks according "
+                    "to priority."
+                ),
+                executor_factory=PriorityAEM,
+            )
+        )
+
+        self.register(
+            AEMDefinition(
+                name=AEMStrategy.RETRY,
+                description=(
+                    "Retry failed worker executions "
+                    "before reporting failure."
+                ),
+                executor_factory=RetryAEM,
+            )
+        )
+
+        self.register(
+            AEMDefinition(
+                name=AEMStrategy.FALLBACK,
+                description=(
+                    "Switch to another capable worker "
+                    "when the current worker fails."
+                ),
+                executor_factory=FallbackAEM,
+            )
+        )
+
+    def register(
+        self,
+        definition: AEMDefinition,
+    ) -> None:
+
+        self._definitions[
+            definition.name
+        ] = definition
+
+    def unregister(
+        self,
+        strategy: AEMStrategy,
+    ) -> None:
+
+        self._definitions.pop(
+            strategy,
+            None,
+        )
+
+    def get(
+        self,
+        strategy: AEMStrategy,
+    ) -> AEM | None:
+
+        definition = self._definitions.get(
+            strategy
+        )
+
+        if (
+            definition is None
+            or not definition.enabled
+        ):
+            return None
+
+        return definition.executor_factory(
+            self.scheduler
+        )
+
+    def has(
+        self,
+        strategy: AEMStrategy,
+    ) -> bool:
+
+        definition = self._definitions.get(
+            strategy
+        )
+
+        return (
+            definition is not None
+            and definition.enabled
+        )
+
+    def list_enabled(
+        self,
+    ) -> list[AEMDefinition]:
+
+        return [
+            definition
+            for definition
+            in self._definitions.values()
+            if definition.enabled
+        ]
+
+    def enable(
+        self,
+        strategy: AEMStrategy,
+    ) -> bool:
+
+        definition = self._definitions.get(
+            strategy
+        )
+
+        if definition is None:
+            return False
+
+        definition.enabled = True
+
+        return True
+
+    def disable(
+        self,
+        strategy: AEMStrategy,
+    ) -> bool:
+
+        definition = self._definitions.get(
+            strategy
+        )
+
+        if definition is None:
+            return False
+
+        definition.enabled = False
+
+        return True
+
+    def count(self) -> int:
+        return len(
+            self._definitions
+        )
+
+    def enabled_count(self) -> int:
+        return len(
+            self.list_enabled()
+        )

@@ -1,0 +1,527 @@
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable
+import time
+import uuid
+
+
+class WorkerStatus(str, Enum):
+    """
+    Runtime state of a Cauvis worker.
+
+    Inspired by Aurora-X worker lifecycle concepts.
+    """
+
+    IDLE = "idle"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    DISABLED = "disabled"
+
+
+class WorkerTaskType(str, Enum):
+    """
+    Broad categories of work a worker can perform.
+
+    More task types can be added as Cauvis grows.
+    """
+
+    GENERAL = "general"
+    RESEARCH = "research"
+    CODE = "code"
+    FILE = "file"
+    SYSTEM = "system"
+    VERIFICATION = "verification"
+
+
+@dataclass
+class WorkerTask:
+    """
+    Represents a unit of work dispatched to a worker.
+
+    This is the bridge between Cauvis planning and
+    Aurora-inspired worker execution.
+    """
+
+    name: str
+    payload: Any = None
+
+    task_type: WorkerTaskType = (
+        WorkerTaskType.GENERAL
+    )
+
+    priority: int = 100
+
+    task_id: str = field(
+        default_factory=lambda: str(uuid.uuid4())
+    )
+
+    required_capabilities: set[str] = field(
+        default_factory=set
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+@dataclass
+class WorkerResult:
+    """
+    Standard result returned by a Cauvis worker.
+
+    Worker success must eventually be tied to the actual
+    ToolResult and VerificationResult produced by Cauvis.
+    """
+
+    success: bool
+
+    worker_name: str
+
+    task_id: str
+
+    output: Any = None
+
+    error: str | None = None
+
+    execution_time: float = 0.0
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+@dataclass
+class WorkerMetrics:
+    """
+    Runtime metrics for a worker.
+
+    These metrics will later help Cauvis make adaptive
+    scheduling decisions.
+    """
+
+    tasks_started: int = 0
+
+    tasks_completed: int = 0
+
+    tasks_failed: int = 0
+
+    total_execution_time: float = 0.0
+
+    last_execution_time: float = 0.0
+
+    last_task_id: str | None = None
+
+    def average_execution_time(self) -> float:
+        if self.tasks_completed == 0:
+            return 0.0
+
+        return (
+            self.total_execution_time
+            / self.tasks_completed
+        )
+
+
+@dataclass
+class Worker:
+    """
+    Aurora-inspired lightweight autonomous worker.
+
+    A worker is NOT a separate Windows process.
+
+    Workers are registered execution units that Cauvis
+    can schedule, monitor, and eventually run in parallel.
+
+    The worker itself does not grant permissions and does
+    not bypass Cauvis security.
+
+    Future execution flow:
+
+        Worker
+            ↓
+        Tool Registry
+            ↓
+        Permission Manager
+            ↓
+        ToolResult
+            ↓
+        Verification
+    """
+
+    name: str
+
+    description: str
+
+    capabilities: set[str] = field(
+        default_factory=set
+    )
+
+    task_types: set[WorkerTaskType] = field(
+        default_factory=lambda: {
+            WorkerTaskType.GENERAL
+        }
+    )
+
+    handler: Callable[
+        [WorkerTask],
+        Any
+    ] | None = None
+
+    enabled: bool = True
+
+    status: WorkerStatus = (
+        WorkerStatus.IDLE
+    )
+
+    metrics: WorkerMetrics = field(
+        default_factory=WorkerMetrics
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    def can_handle(
+        self,
+        task: WorkerTask,
+    ) -> bool:
+        """
+        Determine whether this worker can handle
+        the requested task.
+        """
+
+        if not self.enabled:
+            return False
+
+        if self.status == WorkerStatus.DISABLED:
+            return False
+
+        if (
+            task.task_type
+            not in self.task_types
+        ):
+            return False
+
+        return task.required_capabilities.issubset(
+            self.capabilities
+        )
+
+    def execute(
+        self,
+        task: WorkerTask,
+    ) -> WorkerResult:
+        """
+        Execute a task assigned to this worker.
+
+        This is the worker runtime only.
+
+        Permission checks, tool execution, and verification
+        remain owned by Cauvis's existing systems.
+        """
+
+        if not self.enabled:
+            return WorkerResult(
+                success=False,
+                worker_name=self.name,
+                task_id=task.task_id,
+                error="Worker is disabled.",
+            )
+
+        if self.status == WorkerStatus.DISABLED:
+            return WorkerResult(
+                success=False,
+                worker_name=self.name,
+                task_id=task.task_id,
+                error="Worker is disabled.",
+            )
+
+        if not self.can_handle(task):
+            return WorkerResult(
+                success=False,
+                worker_name=self.name,
+                task_id=task.task_id,
+                error=(
+                    "Worker cannot handle this task."
+                ),
+            )
+
+        if self.handler is None:
+            return WorkerResult(
+                success=False,
+                worker_name=self.name,
+                task_id=task.task_id,
+                error=(
+                    "Worker has no executable handler."
+                ),
+            )
+
+        self.status = WorkerStatus.RUNNING
+
+        self.metrics.tasks_started += 1
+        self.metrics.last_task_id = task.task_id
+
+        started = time.perf_counter()
+
+        try:
+            output = self.handler(task)
+
+            elapsed = (
+                time.perf_counter()
+                - started
+            )
+
+            self.status = WorkerStatus.SUCCESS
+
+            self.metrics.tasks_completed += 1
+            self.metrics.total_execution_time += (
+                elapsed
+            )
+            self.metrics.last_execution_time = (
+                elapsed
+            )
+
+            return WorkerResult(
+                success=True,
+                worker_name=self.name,
+                task_id=task.task_id,
+                output=output,
+                execution_time=elapsed,
+                metadata={
+                    "task_type": (
+                        task.task_type.value
+                    ),
+                    "priority": task.priority,
+                },
+            )
+
+        except Exception as exc:
+
+            elapsed = (
+                time.perf_counter()
+                - started
+            )
+
+            self.status = WorkerStatus.FAILED
+
+            self.metrics.tasks_failed += 1
+            self.metrics.last_execution_time = (
+                elapsed
+            )
+
+            return WorkerResult(
+                success=False,
+                worker_name=self.name,
+                task_id=task.task_id,
+                error=str(exc),
+                execution_time=elapsed,
+                metadata={
+                    "task_type": (
+                        task.task_type.value
+                    ),
+                    "priority": task.priority,
+                },
+            )
+
+        finally:
+
+            if (
+                self.enabled
+                and self.status
+                != WorkerStatus.DISABLED
+            ):
+                self.status = WorkerStatus.IDLE
+
+    def disable(self) -> None:
+        """
+        Disable the worker.
+        """
+
+        self.enabled = False
+        self.status = WorkerStatus.DISABLED
+
+    def enable(self) -> None:
+        """
+        Re-enable the worker.
+        """
+
+        self.enabled = True
+        self.status = WorkerStatus.IDLE
+
+
+class WorkerRegistry:
+    """
+    Central registry for Cauvis workers.
+
+    This follows the same registry architecture already
+    used by Cauvis capabilities and tools.
+
+    The registry allows the future scheduler to dynamically
+    discover workers instead of using hard-coded conditionals.
+    """
+
+    def __init__(self):
+        self._workers: dict[str, Worker] = {}
+
+    def register(
+        self,
+        worker: Worker,
+    ) -> None:
+
+        if not worker.name.strip():
+            raise ValueError(
+                "Worker name cannot be empty."
+            )
+
+        if worker.name in self._workers:
+            raise ValueError(
+                f"Worker already registered: "
+                f"{worker.name}"
+            )
+
+        self._workers[worker.name] = worker
+
+    def unregister(
+        self,
+        name: str,
+    ) -> None:
+
+        self._workers.pop(
+            name,
+            None,
+        )
+
+    def get(
+        self,
+        name: str,
+    ) -> Worker | None:
+
+        return self._workers.get(name)
+
+    def has(
+        self,
+        name: str,
+    ) -> bool:
+
+        worker = self.get(name)
+
+        return (
+            worker is not None
+            and worker.enabled
+        )
+
+    def list_all(
+        self,
+    ) -> list[Worker]:
+
+        return list(
+            self._workers.values()
+        )
+
+    def list_enabled(
+        self,
+    ) -> list[Worker]:
+
+        return [
+            worker
+            for worker
+            in self._workers.values()
+            if worker.enabled
+        ]
+
+    def find_for_task(
+        self,
+        task: WorkerTask,
+    ) -> list[Worker]:
+        """
+        Return all enabled workers capable of
+        handling the requested task.
+        """
+
+        return [
+            worker
+            for worker
+            in self.list_enabled()
+            if worker.can_handle(task)
+        ]
+
+    def find_by_capability(
+        self,
+        capability: str,
+    ) -> list[Worker]:
+
+        return [
+            worker
+            for worker
+            in self.list_enabled()
+            if capability
+            in worker.capabilities
+        ]
+
+    def enable(
+        self,
+        name: str,
+    ) -> bool:
+
+        worker = self.get(name)
+
+        if worker is None:
+            return False
+
+        worker.enable()
+
+        return True
+
+    def disable(
+        self,
+        name: str,
+    ) -> bool:
+
+        worker = self.get(name)
+
+        if worker is None:
+            return False
+
+        worker.disable()
+
+        return True
+
+    def count(self) -> int:
+
+        return len(
+            self._workers
+        )
+
+    def enabled_count(self) -> int:
+
+        return len(
+            self.list_enabled()
+        )
+
+    def capability_summary(
+        self,
+    ) -> dict[str, int]:
+        """
+        Return how many enabled workers provide each
+        capability.
+
+        This will later help the scheduler make
+        capability and load decisions.
+        """
+
+        summary: dict[str, int] = {}
+
+        for worker in self.list_enabled():
+
+            for capability in (
+                worker.capabilities
+            ):
+
+                summary[capability] = (
+                    summary.get(
+                        capability,
+                        0,
+                    )
+                    + 1
+                )
+
+        return summary
