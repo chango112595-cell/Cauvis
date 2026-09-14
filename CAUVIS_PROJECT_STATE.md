@@ -6915,4 +6915,125 @@ After Fix #3:
 
 ---
 
+# LIVE BETA ROUND 2 FIX CHECKPOINT — 63/63 VERIFIED
+
+## Round 2 Fix #3 — session-memory provenance wording
+
+Status: **COMPLETE**
+
+Current-session conversation recall is now explicitly separated from
+persistent cross-session memory.
+
+Changes:
+
+- the turn system prompt now states that conversation history is
+  current-session short-term context only
+- Cauvis is instructed not to describe current-session recall as
+  coming from a previous, last, or earlier session
+- a narrow deterministic sanitizer corrects affirmative false
+  cross-session wording such as:
+  - `in our previous session`
+  - `from our last session`
+  - `last session you told me`
+- truthful limitation statements such as
+  `I cannot remember previous sessions` remain unchanged
+- corrected wording is what enters assistant conversation history
+
+Permanent regression coverage:
+
+- Test 62 — `Session Memory Provenance Wording`
+
+Verified baseline after Fix #3:
+
+- PASSED: 62
+- FAILED: 0
+- TOTAL: 62
+
+## Round 2 Fix #4 — developer capability-building boundary
+
+Status: **COMPLETE**
+
+Cauvis now distinguishes developer artifact generation from actual
+external execution/self-modification.
+
+Developer-review requests such as:
+
+- write code for a future capability
+- draft a patch
+- design implementation/tests
+- generate a script for review
+
+remain normal conversational/code-generation requests.
+
+Requests that actually cause side effects remain external actions and
+continue to fail closed unless a verified execution bridge is present,
+including:
+
+- write code to a file
+- apply/install a patch
+- install a package
+- run/execute a script
+- perform live web retrieval
+
+Permanent regression coverage:
+
+- Test 63 — `Developer Capability-Building Boundary`
+
+## Current verified baseline
+
+Full `validate_cauvis.py` result after Round 2 Fix #4:
+
+```text
+PASSED:  63
+FAILED:  0
+TOTAL:   63
+STATUS: ALL TESTS PASSED
+```
+
+Validation elapsed time observed:
+
+`1.63 seconds`
+
+This **63/63** result is the current verified regression baseline.
+
+## Current Round 2 fix status
+
+Completed:
+
+1. internal prompt/context leakage
+2. factual boundary refinement
+3. session-memory provenance wording
+4. developer capability-building request classification
+
+Remaining priority order:
+
+5. **Duplicate Cauvis prefix / response presentation**
+6. **Latency telemetry and performance diagnosis**
+7. **Broader multi-question completeness coverage**
+8. **Broader language-consistency coverage**
+9. **Remaining factual/entity uncertainty behavior**
+10. **Real retrieval execution/evidence bridge**
+
+## Immediate next step
+
+**NEXT: Round 2 Fix #5 — duplicate Cauvis prefix / response presentation**
+
+Observed live-beta symptom:
+
+`Cauvis: Cauvis: ...`
+
+The CLI already supplies the `Cauvis:` speaker label. Model output
+must therefore not persist redundant leading assistant labels.
+
+Desired behavior:
+
+- strip one or more redundant leading `Cauvis:` labels from model
+  response text
+- do not alter normal sentences that merely mention Cauvis
+- sanitize before conversation history storage
+- add permanent regression coverage
+- preserve the 63/63 baseline and advance it after validation
+
+---
+
 # END OF SOURCE-OF-TRUTH FILE

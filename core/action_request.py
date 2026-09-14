@@ -63,6 +63,50 @@ class ActionRequestDetector:
         "capabilities do you have",
     )
 
+    _DEVELOPMENT_ARTIFACT_HINTS = (
+        "code",
+        "patch",
+        "script",
+        "tests",
+        "test suite",
+        "implementation",
+        "design",
+        "prototype",
+        "example",
+        "snippet",
+    )
+
+    _DEVELOPMENT_ARTIFACT_VERBS = (
+        "write",
+        "draft",
+        "design",
+        "create",
+        "make",
+        "generate",
+        "show",
+        "provide",
+        "give me",
+    )
+
+    _DEVELOPMENT_EXECUTION_MARKERS = (
+        "write this ",
+        "write it ",
+        "save this ",
+        "save it ",
+        " to file",
+        " to a file",
+        " into file",
+        " into a file",
+        " on disk",
+        " in the filesystem",
+        "apply the patch",
+        "apply this patch",
+        "install the patch",
+        "install this patch",
+        "run the script",
+        "execute the script",
+    )
+
     _INSTRUCTIONAL_PREFIXES = (
         "how do i ",
         "how can i ",
@@ -160,6 +204,14 @@ class ActionRequestDetector:
         if not normalized:
             return self._not_requested(
                 "Input is empty."
+            )
+
+        if self._is_development_artifact_request(
+            normalized
+        ):
+            return self._not_requested(
+                "Request asks Cauvis to generate a developer "
+                "artifact for review, not to execute or apply it."
             )
 
         if self._is_capability_status_question(
@@ -319,6 +371,38 @@ class ActionRequestDetector:
         return self._not_requested(
             "No deterministic direct external action "
             "pattern matched."
+        )
+
+    @classmethod
+    def _is_development_artifact_request(
+        cls,
+        text: str,
+    ) -> bool:
+        candidate = cls._strip_polite_prefix(
+            text
+        )
+
+        if any(
+            marker in candidate
+            for marker
+            in cls._DEVELOPMENT_EXECUTION_MARKERS
+        ):
+            return False
+
+        if not any(
+            candidate == verb
+            or candidate.startswith(
+                verb + " "
+            )
+            for verb
+            in cls._DEVELOPMENT_ARTIFACT_VERBS
+        ):
+            return False
+
+        return any(
+            hint in candidate
+            for hint
+            in cls._DEVELOPMENT_ARTIFACT_HINTS
         )
 
     @classmethod

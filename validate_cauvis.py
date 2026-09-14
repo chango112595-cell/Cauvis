@@ -9225,6 +9225,190 @@ def test_session_memory_provenance_wording():
     return True
 
 
+
+# ============================================================
+# TEST 63 - DEVELOPER CAPABILITY-BUILDING BOUNDARY
+# ============================================================
+
+def test_developer_capability_building_boundary():
+    """
+    Verify developer artifact requests remain conversational
+    generation requests rather than being misclassified as
+    external execution or autonomous self-modification.
+    """
+
+    from core.action_request import (
+        ActionRequestDetector,
+    )
+    from core.config import CauvisConfig
+    from core.orchestrator import (
+        CauvisOrchestrator,
+    )
+    from intelligence.models import (
+        ModelResponse,
+    )
+    from intelligence.router import (
+        AIModelRouter,
+    )
+
+    detector = ActionRequestDetector()
+
+    developer_requests = (
+        (
+            "Write code for a temporary internet capability "
+            "and show me the patch."
+        ),
+        (
+            "Can you write a Python script file for developer "
+            "review that adds a temporary internet adapter?"
+        ),
+        (
+            "Design the code and tests for adding web retrieval "
+            "later."
+        ),
+        (
+            "Draft a patch for the developer to review."
+        ),
+    )
+
+    for prompt in developer_requests:
+        result = detector.detect(
+            prompt
+        )
+
+        assert result.requested is False
+
+    write_file = detector.detect(
+        "Write this code to a file."
+    )
+
+    assert write_file.requested is True
+    assert write_file.category == "filesystem"
+    assert (
+        write_file.required_capability
+        == "filesystem_actions"
+    )
+
+    web_action = detector.detect(
+        "Search the web for Python 3.14."
+    )
+
+    assert web_action.requested is True
+    assert web_action.category == "web"
+
+    install_action = detector.detect(
+        "Install this package."
+    )
+
+    assert install_action.requested is True
+    assert install_action.category == "external"
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                {
+                    "user_input": user_input,
+                    "system_prompt": (
+                        system_prompt or ""
+                    ),
+                }
+            )
+
+            return ModelResponse(
+                text=(
+                    "Here is a developer-review patch. "
+                    "I have not applied or executed it."
+                ),
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    prompt = developer_requests[0]
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id=(
+            "developer-capability-building-test"
+        ),
+    )
+
+    response = orchestrator.handle(
+        prompt
+    )
+
+    assert response.status == "success"
+    assert len(calls) == 1
+    assert calls[0]["user_input"] == prompt
+
+    assert (
+        "developer-review patch"
+        in response.message
+    )
+
+    system_prompt = calls[
+        0
+    ][
+        "system_prompt"
+    ]
+
+    assert (
+        "treat that as content generation"
+        in system_prompt
+    )
+
+    assert (
+        "not as an instruction to self-modify"
+        in system_prompt
+    )
+
+    assert (
+        "never claim that code was written to disk"
+        in system_prompt
+    )
+
+    blocked = orchestrator.handle(
+        "Write this code to a file."
+    )
+
+    assert blocked.status == "blocked"
+    assert len(calls) == 1
+
+    print(
+        "DEVELOPER ARTIFACT CASES:",
+        len(developer_requests),
+    )
+
+    print(
+        "DEVELOPER MODEL PATH:",
+        True,
+    )
+
+    print(
+        "REAL FILE WRITE BLOCKED:",
+        True,
+    )
+
+    print(
+        "WEB ACTION STILL DIRECT:",
+        True,
+    )
+
+    return True
+
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -9395,6 +9579,10 @@ tests = [
     (
         "Session Memory Provenance Wording",
         test_session_memory_provenance_wording,
+    ),
+    (
+        "Developer Capability-Building Boundary",
+        test_developer_capability_building_boundary,
     ),
 ]
 
