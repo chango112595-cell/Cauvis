@@ -1,5 +1,7 @@
-from dataclasses import dataclass, field
+﻿from dataclasses import dataclass, field
 from typing import Any
+
+from intelligence.evidence import ClaimEvidenceBundle
 
 
 @dataclass
@@ -19,3 +21,6 @@ class ModelResponse:
     success: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    evidence: list[ClaimEvidenceBundle] = field(
+        default_factory=list
+    )

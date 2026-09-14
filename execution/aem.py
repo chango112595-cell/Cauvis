@@ -627,6 +627,20 @@ class FallbackAEM(AEM):
                 )
             )
 
+            excluded_workers = set(
+                worker_task.metadata.get(
+                    "recovery_exclude_workers",
+                    [],
+                )
+            )
+
+            if excluded_workers:
+                candidates = [
+                    worker
+                    for worker in candidates
+                    if worker.name not in excluded_workers
+                ]
+
             if not candidates:
 
                 return AEMResult(
@@ -658,7 +672,8 @@ class FallbackAEM(AEM):
                 )
 
                 dispatch_result = (
-                    self.scheduler.dispatch(
+                    self.scheduler.dispatch_to_worker(
+                        worker,
                         worker_task
                     )
                 )
@@ -1056,6 +1071,38 @@ class DependencyGraphAEM(AEM):
         self,
         tasks: list[AEMTask],
     ) -> AEMResult:
+        return self._execute_graph(
+            tasks,
+            completed_outputs={},
+            resumed=False,
+        )
+
+    def resume(
+        self,
+        tasks: list[AEMTask],
+        completed_outputs: dict[str, Any],
+    ) -> AEMResult:
+        """
+        Resume a dependency graph from outputs that were
+        previously completed successfully.
+
+        Seeded tasks are treated as successfully complete
+        and are never dispatched again.
+        """
+        return self._execute_graph(
+            tasks,
+            completed_outputs=dict(
+                completed_outputs
+            ),
+            resumed=True,
+        )
+
+    def _execute_graph(
+        self,
+        tasks: list[AEMTask],
+        completed_outputs: dict[str, Any],
+        resumed: bool,
+    ) -> AEMResult:
 
         if not tasks:
 
@@ -1089,11 +1136,101 @@ class DependencyGraphAEM(AEM):
                 },
             )
 
-        completed: dict[str, WorkerResult] = {}
-        dependency_outputs: dict[str, Any] = {}
+        seeded_outputs = dict(
+            completed_outputs
+        )
+
+        unknown_seeded_tasks = (
+            set(seeded_outputs)
+            - set(task_map)
+        )
+
+        if unknown_seeded_tasks:
+            return AEMResult(
+                success=False,
+                strategy=self.name,
+                completed_tasks=0,
+                total_tasks=len(tasks),
+                results=[],
+                error=(
+                    "Resume state contains unknown tasks: "
+                    + ", ".join(
+                        sorted(
+                            unknown_seeded_tasks
+                        )
+                    )
+                ),
+                metadata={
+                    "dependency_graph": True,
+                    "validation_failed": True,
+                    "resume_validation_failed": True,
+                },
+            )
+
+        incomplete_seeded_tasks = {}
+
+        for task_name in seeded_outputs:
+
+            missing_dependencies = (
+                set(
+                    task_map[
+                        task_name
+                    ].dependencies
+                )
+                - set(seeded_outputs)
+            )
+
+            if missing_dependencies:
+
+                incomplete_seeded_tasks[
+                    task_name
+                ] = sorted(
+                    missing_dependencies
+                )
+
+        if incomplete_seeded_tasks:
+            return AEMResult(
+                success=False,
+                strategy=self.name,
+                completed_tasks=0,
+                total_tasks=len(tasks),
+                results=[],
+                error=(
+                    "Resume state is missing prerequisite "
+                    "outputs for seeded tasks."
+                ),
+                metadata={
+                    "dependency_graph": True,
+                    "validation_failed": True,
+                    "resume_validation_failed": True,
+                    "incomplete_seeded_tasks": (
+                        incomplete_seeded_tasks
+                    ),
+                },
+            )
+
+        completed: dict[
+            str,
+            WorkerResult,
+        ] = {}
+
+        dependency_outputs: dict[
+            str,
+            Any,
+        ] = dict(
+            seeded_outputs
+        )
+
+        successful_tasks = set(
+            seeded_outputs
+        )
+
         results: list[WorkerResult] = []
 
-        pending = set(task_map)
+        pending = (
+            set(task_map)
+            - successful_tasks
+        )
 
         waves: list[list[str]] = []
         blocked: dict[str, str] = {}
@@ -1160,7 +1297,7 @@ class DependencyGraphAEM(AEM):
                     continue
 
                 if all(
-                    dependency in completed
+                    dependency in successful_tasks
                     for dependency
                     in task.dependencies
                 ):
@@ -1178,7 +1315,7 @@ class DependencyGraphAEM(AEM):
                         success=False,
                         strategy=self.name,
                         completed_tasks=len(
-                            completed
+                            successful_tasks
                         ),
                         total_tasks=len(tasks),
                         results=results,
@@ -1298,6 +1435,10 @@ class DependencyGraphAEM(AEM):
                         task.name
                     ] = worker_result.output
 
+                    successful_tasks.add(
+                        task.name
+                    )
+
             failed_tasks = [
                 task.name
                 for task in ready
@@ -1316,11 +1457,8 @@ class DependencyGraphAEM(AEM):
                 return AEMResult(
                     success=False,
                     strategy=self.name,
-                    completed_tasks=sum(
-                        1
-                        for result
-                        in completed.values()
-                        if result.success
+                    completed_tasks=len(
+                        successful_tasks
                     ),
                     total_tasks=len(tasks),
                     results=results,
@@ -1346,11 +1484,8 @@ class DependencyGraphAEM(AEM):
             return AEMResult(
                 success=False,
                 strategy=self.name,
-                completed_tasks=sum(
-                    1
-                    for result
-                    in completed.values()
-                    if result.success
+                completed_tasks=len(
+                    successful_tasks
                 ),
                 total_tasks=len(tasks),
                 results=results,
@@ -1374,11 +1509,8 @@ class DependencyGraphAEM(AEM):
         return AEMResult(
             success=True,
             strategy=self.name,
-            completed_tasks=sum(
-                1
-                for result
-                in completed.values()
-                if result.success
+            completed_tasks=len(
+                successful_tasks
             ),
             total_tasks=len(tasks),
             results=results,

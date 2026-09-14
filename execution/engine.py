@@ -3,6 +3,10 @@ from enum import Enum
 from typing import Any
 
 from capabilities.registry import CapabilityRegistry
+from execution.aem import AEMRegistry, AEMStrategy
+from execution.planner import AdaptiveExecutionPlan
+from execution.scheduler import WorkerScheduler
+from execution.recovery import RecoveryEngine
 from intelligence.reasoning import ReasoningResult
 from security.permissions import PermissionManager
 from tools.registry import ToolRegistry
@@ -88,11 +92,23 @@ class ExecutionEngine:
         tool_registry: ToolRegistry,
         permission_manager: PermissionManager,
         verification_engine: VerificationEngine,
+        worker_scheduler: WorkerScheduler | None = None,
+        aem_registry: AEMRegistry | None = None,
     ):
         self.capability_registry = capability_registry
         self.tool_registry = tool_registry
         self.permission_manager = permission_manager
         self.verification_engine = verification_engine
+        self.worker_scheduler = worker_scheduler
+
+        if aem_registry is not None:
+            self.aem_registry = aem_registry
+        elif worker_scheduler is not None:
+            self.aem_registry = AEMRegistry(
+                worker_scheduler
+            )
+        else:
+            self.aem_registry = None
 
     def create_plan(
         self,
@@ -263,6 +279,485 @@ class ExecutionEngine:
             completed_steps == len(plan.steps)
             and plan.status
             == ExecutionStatus.RUNNING
+        )
+
+    def execute_adaptive(
+        self,
+        plan: AdaptiveExecutionPlan,
+    ) -> ExecutionResult:
+        """
+        Execute an AdaptiveExecutionPlan through Cauvis AEMs
+        and the worker scheduler.
+
+        The legacy execute(ExecutionPlan) path remains separate
+        so existing execution behavior stays backward compatible.
+        """
+
+        total_tasks = len(plan.tasks)
+
+        if not plan.tasks:
+            return ExecutionResult(
+                success=False,
+                goal=plan.goal,
+                status=ExecutionStatus.FAILED,
+                completed_steps=0,
+                total_steps=0,
+                error=(
+                    "Adaptive execution plan contains no tasks."
+                ),
+                metadata={
+                    "execution_mode": "adaptive_aem",
+                },
+            )
+
+        if (
+            self.worker_scheduler is None
+            or self.aem_registry is None
+        ):
+            return ExecutionResult(
+                success=False,
+                goal=plan.goal,
+                status=ExecutionStatus.FAILED,
+                completed_steps=0,
+                total_steps=total_tasks,
+                error=(
+                    "Adaptive execution requires a configured "
+                    "WorkerScheduler and AEMRegistry."
+                ),
+                metadata={
+                    "execution_mode": "adaptive_aem",
+                },
+            )
+
+        required_capabilities: set[str] = set()
+
+        for task in plan.tasks:
+            required_capabilities.update(
+                task.required_capabilities
+            )
+
+        missing_capabilities = (
+            self.capability_registry.missing(
+                required_capabilities
+            )
+        )
+
+        if missing_capabilities:
+            return ExecutionResult(
+                success=False,
+                goal=plan.goal,
+                status=ExecutionStatus.FAILED,
+                completed_steps=0,
+                total_steps=total_tasks,
+                error=(
+                    "Required adaptive execution "
+                    "capabilities are unavailable."
+                ),
+                metadata={
+                    "execution_mode": "adaptive_aem",
+                    "missing_capabilities": sorted(
+                        missing_capabilities
+                    ),
+                },
+            )
+
+        required_permissions = set(
+            plan.metadata.get(
+                "required_permissions",
+                [],
+            )
+        )
+
+        blocked_permissions = []
+
+        for action in required_permissions:
+            decision = (
+                self.permission_manager.evaluate(
+                    action
+                )
+            )
+
+            if not decision.allowed:
+                blocked_permissions.append(action)
+
+        if blocked_permissions:
+            return ExecutionResult(
+                success=False,
+                goal=plan.goal,
+                status=ExecutionStatus.FAILED,
+                completed_steps=0,
+                total_steps=total_tasks,
+                error=(
+                    "Required permissions were not granted."
+                ),
+                metadata={
+                    "execution_mode": "adaptive_aem",
+                    "blocked_permissions": sorted(
+                        blocked_permissions
+                    ),
+                },
+            )
+
+        adaptive_aem = self.aem_registry.get(
+            AEMStrategy.ADAPTIVE
+        )
+
+        if adaptive_aem is None:
+            return ExecutionResult(
+                success=False,
+                goal=plan.goal,
+                status=ExecutionStatus.FAILED,
+                completed_steps=0,
+                total_steps=total_tasks,
+                error=(
+                    "Adaptive AEM is unavailable or disabled."
+                ),
+                metadata={
+                    "execution_mode": "adaptive_aem",
+                },
+            )
+
+        try:
+            aem_result = adaptive_aem.execute(
+                plan.tasks
+            )
+
+        except Exception as exc:
+            return ExecutionResult(
+                success=False,
+                goal=plan.goal,
+                status=ExecutionStatus.FAILED,
+                completed_steps=0,
+                total_steps=total_tasks,
+                error=str(exc),
+                metadata={
+                    "execution_mode": "adaptive_aem",
+                },
+            )
+
+        result_metadata = dict(
+            aem_result.metadata
+        )
+
+        result_metadata.update(
+            {
+                "execution_mode": "adaptive_aem",
+                "aem_strategy": (
+                    aem_result.strategy.value
+                ),
+                "worker_results": (
+                    aem_result.results
+                ),
+            }
+        )
+
+        if not aem_result.success:
+            result_metadata["verified"] = False
+
+            recovery_engine = RecoveryEngine(
+                self.aem_registry
+            )
+
+            recovery_decision = (
+                recovery_engine.decide(
+                    plan.tasks,
+                    aem_result,
+                )
+            )
+
+            result_metadata[
+                "recovery_decision"
+            ] = {
+                "action": (
+                    recovery_decision.action.value
+                ),
+                "recoverable": (
+                    recovery_decision.recoverable
+                ),
+                "reason": recovery_decision.reason,
+                "failed_tasks": list(
+                    recovery_decision.failed_tasks
+                ),
+                "metadata": dict(
+                    recovery_decision.metadata
+                ),
+            }
+
+            # Automatic recovery is intentionally limited
+            # to single-task plans in Stage 3.
+            #
+            # Multi-task dependency plans may still contain
+            # downstream work that must be resumed safely.
+            if (
+                total_tasks == 1
+                and recovery_decision.recoverable
+            ):
+                recovery_result = (
+                    recovery_engine.recover(
+                        plan.tasks,
+                        aem_result,
+                    )
+                )
+
+                result_metadata[
+                    "recovery_result"
+                ] = {
+                    "success": recovery_result.success,
+                    "action": (
+                        recovery_result.action.value
+                    ),
+                    "recovered_tasks": (
+                        recovery_result.recovered_tasks
+                    ),
+                    "total_failed_tasks": (
+                        recovery_result.total_failed_tasks
+                    ),
+                    "error": recovery_result.error,
+                    "metadata": dict(
+                        recovery_result.metadata
+                    ),
+                }
+
+                recovery_aem_result = (
+                    recovery_result.aem_result
+                )
+
+                recovery_verified = (
+                    recovery_result.success
+                    and recovery_aem_result
+                    is not None
+                    and recovery_aem_result.success
+                    and recovery_aem_result.completed_tasks
+                    == recovery_aem_result.total_tasks
+                    == total_tasks
+                )
+
+                if recovery_verified:
+                    result_metadata[
+                        "original_worker_results"
+                    ] = list(
+                        aem_result.results
+                    )
+
+                    result_metadata[
+                        "worker_results"
+                    ] = list(
+                        recovery_aem_result.results
+                    )
+
+                    result_metadata[
+                        "recovered"
+                    ] = True
+
+                    result_metadata[
+                        "verified"
+                    ] = True
+
+                    return ExecutionResult(
+                        success=True,
+                        goal=plan.goal,
+                        status=ExecutionStatus.SUCCESS,
+                        completed_steps=total_tasks,
+                        total_steps=total_tasks,
+                        metadata=result_metadata,
+                    )
+
+            # ------------------------------------------------
+            # Stage 4: safe dependency-graph recovery + resume
+            # ------------------------------------------------
+            #
+            # Ordinary multi-task strategies remain blocked
+            # from automatic recovery. Only dependency graphs
+            # can resume because they preserve successful
+            # outputs and dependency state.
+            #
+            # total_tasks > 1 also prevents a single-task graph
+            # from entering both the Stage 3 and Stage 4 paths.
+            if (
+                total_tasks > 1
+                and recovery_decision.recoverable
+                and aem_result.strategy
+                == AEMStrategy.DEPENDENCY_GRAPH
+            ):
+                recovery_result = (
+                    recovery_engine.recover(
+                        plan.tasks,
+                        aem_result,
+                    )
+                )
+
+                result_metadata[
+                    "recovery_result"
+                ] = {
+                    "success": recovery_result.success,
+                    "action": (
+                        recovery_result.action.value
+                    ),
+                    "recovered_tasks": (
+                        recovery_result.recovered_tasks
+                    ),
+                    "total_failed_tasks": (
+                        recovery_result.total_failed_tasks
+                    ),
+                    "error": recovery_result.error,
+                    "metadata": dict(
+                        recovery_result.metadata
+                    ),
+                }
+
+                recovery_aem_result = (
+                    recovery_result.aem_result
+                )
+
+                recovery_completed = (
+                    recovery_result.success
+                    and recovery_aem_result
+                    is not None
+                    and recovery_aem_result.success
+                    and recovery_aem_result.completed_tasks
+                    == recovery_aem_result.total_tasks
+                    == recovery_result.total_failed_tasks
+                )
+
+                if recovery_completed:
+                    resumed_result = (
+                        recovery_engine.resume_dependency_graph(
+                            plan.tasks,
+                            aem_result,
+                            recovery_result,
+                        )
+                    )
+
+                    result_metadata[
+                        "graph_resume_result"
+                    ] = {
+                        "success": resumed_result.success,
+                        "completed_tasks": (
+                            resumed_result.completed_tasks
+                        ),
+                        "total_tasks": (
+                            resumed_result.total_tasks
+                        ),
+                        "error": resumed_result.error,
+                        "metadata": dict(
+                            resumed_result.metadata
+                        ),
+                    }
+
+                    resume_verified = (
+                        resumed_result.success
+                        and resumed_result.completed_tasks
+                        == resumed_result.total_tasks
+                        == total_tasks
+                    )
+
+                    if resume_verified:
+                        result_metadata[
+                            "original_worker_results"
+                        ] = list(
+                            aem_result.results
+                        )
+
+                        result_metadata[
+                            "recovery_worker_results"
+                        ] = list(
+                            recovery_aem_result.results
+                        )
+
+                        result_metadata[
+                            "resume_worker_results"
+                        ] = list(
+                            resumed_result.results
+                        )
+
+                        result_metadata[
+                            "worker_results"
+                        ] = list(
+                            resumed_result.results
+                        )
+
+                        result_metadata[
+                            "outputs"
+                        ] = dict(
+                            resumed_result.metadata.get(
+                                "outputs",
+                                {},
+                            )
+                        )
+
+                        result_metadata[
+                            "recovered"
+                        ] = True
+
+                        result_metadata[
+                            "resumed"
+                        ] = True
+
+                        result_metadata[
+                            "verified"
+                        ] = True
+
+                        return ExecutionResult(
+                            success=True,
+                            goal=plan.goal,
+                            status=ExecutionStatus.SUCCESS,
+                            completed_steps=total_tasks,
+                            total_steps=total_tasks,
+                            metadata=result_metadata,
+                        )
+
+            return ExecutionResult(
+                success=False,
+                goal=plan.goal,
+                status=ExecutionStatus.FAILED,
+                completed_steps=(
+                    aem_result.completed_tasks
+                ),
+                total_steps=(
+                    aem_result.total_tasks
+                ),
+                error=(
+                    aem_result.error
+                    or "Adaptive AEM execution failed."
+                ),
+                metadata=result_metadata,
+            )
+
+        verified = (
+            aem_result.completed_tasks
+            == aem_result.total_tasks
+            == total_tasks
+        )
+
+        if not verified:
+            result_metadata["verified"] = False
+
+            return ExecutionResult(
+                success=False,
+                goal=plan.goal,
+                status=ExecutionStatus.FAILED,
+                completed_steps=(
+                    aem_result.completed_tasks
+                ),
+                total_steps=total_tasks,
+                error=(
+                    "Adaptive execution completed but "
+                    "verification failed."
+                ),
+                metadata=result_metadata,
+            )
+
+        result_metadata["verified"] = True
+
+        return ExecutionResult(
+            success=True,
+            goal=plan.goal,
+            status=ExecutionStatus.SUCCESS,
+            completed_steps=(
+                aem_result.completed_tasks
+            ),
+            total_steps=total_tasks,
+            metadata=result_metadata,
         )
 
     def execute(

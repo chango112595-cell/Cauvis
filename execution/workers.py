@@ -163,6 +163,9 @@ class Worker:
                 worker_name=self.name,
                 task_id=task.task_id,
                 error="Worker is disabled.",
+                metadata={
+                    "task_name": task.name,
+                },
             )
 
         if not self.can_handle(task):
@@ -174,6 +177,9 @@ class Worker:
                     "Worker cannot handle "
                     f"task '{task.name}'."
                 ),
+                metadata={
+                    "task_name": task.name,
+                },
             )
 
         if self.handler is None:
@@ -182,6 +188,9 @@ class Worker:
                 worker_name=self.name,
                 task_id=task.task_id,
                 error="Worker has no handler.",
+                metadata={
+                    "task_name": task.name,
+                },
             )
 
         self.status = WorkerStatus.RUNNING
@@ -215,6 +224,9 @@ class Worker:
                 task_id=task.task_id,
                 output=output,
                 execution_time=execution_time,
+                metadata={
+                    "task_name": task.name,
+                },
             )
 
         except Exception as exc:
@@ -237,6 +249,9 @@ class Worker:
                 task_id=task.task_id,
                 execution_time=execution_time,
                 error=str(exc),
+                metadata={
+                    "task_name": task.name,
+                },
             )
 
         finally:

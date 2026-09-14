@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 
 
 @dataclass
@@ -20,7 +20,16 @@ class IntentDetector:
                 original_input=text,
             )
 
-        if normalized in {"exit", "quit", "shutdown"}:
+        shutdown_commands = {
+            "shutdown",
+            "exit",
+            "quit",
+            "salir",
+            "cerrar",
+            "apagar",
+        }
+
+        if normalized in shutdown_commands:
             return Intent(
                 name="shutdown",
                 confidence=1.0,

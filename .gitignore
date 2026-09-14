@@ -42,3 +42,25 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+# Cauvis development backups
+*.backup
+*.backup.*
+*.before_*
+*.accidental_*
+CAUVIS_PROJECT_STATE.md.backup*
+
+# Temporary validation/debug output
+beta12e_validation_failure.txt
+
+# Development patch/checkpoint scripts
+patch_*.py
+fix_*.py
+checkpoint_project_state_*.py
+
+# Temporary creation/migration scripts
+create_*beta*.py
+create_*stage*.py
+
+# Focused temporary Beta test harnesses
+/test_*beta*.py

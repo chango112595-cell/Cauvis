@@ -1,14 +1,14 @@
-from core.config import CauvisConfig
+﻿from core.config import CauvisConfig
 from core.orchestrator import CauvisOrchestrator
 
 
 def main():
     config = CauvisConfig()
-    cauvis = CauvisOrchestrator(config)
+    cauvis = CauvisOrchestrator(config, enable_ai=True)
 
     print("=" * 50)
     print(f"{config.name} v{config.version}")
-    print("Cauvis foundation online.")
+    print("Cauvis Beta 1 online.")
     print("=" * 50)
 
     while cauvis.state.running:

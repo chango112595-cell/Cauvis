@@ -8,6 +8,10 @@ from intelligence.task import TaskAnalyzer, TaskRequirements
 from intelligence.device import DeviceProfiler, DeviceProfile
 from intelligence.policy import AdaptivePolicyEngine, IntelligencePolicy
 from intelligence.capabilities import CapabilityMapper, CapabilitySet
+from intelligence.system_context import (
+    SystemContextBuilder,
+    SystemContextSnapshot,
+)
 
 from execution.planner import (
     AdaptiveExecutionPlan,
@@ -28,6 +32,7 @@ class BrainAnalysis:
     device: DeviceProfile
     policy: IntelligencePolicy
     execution_plan: AdaptiveExecutionPlan | None = None
+    system_context: SystemContextSnapshot | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -52,6 +57,7 @@ class CauvisBrain:
         policy_engine: AdaptivePolicyEngine | None = None,
         capability_mapper: CapabilityMapper | None = None,
         task_planner: AdaptiveTaskPlanner | None = None,
+        system_context_builder: SystemContextBuilder | None = None,
     ):
         self.router = router
 
@@ -77,6 +83,11 @@ class CauvisBrain:
 
         self.task_planner = (
             task_planner or AdaptiveTaskPlanner()
+        )
+
+        self.system_context_builder = (
+            system_context_builder
+            or SystemContextBuilder(router)
         )
 
         self._device_profile: DeviceProfile | None = None
@@ -145,13 +156,22 @@ class CauvisBrain:
         # Cauvis currently has available.
         device = self.get_device_profile()
 
-        # Step 5: Decide how Cauvis should execute the task.
+        # Step 5: Build a read-only snapshot of what Cauvis
+        # can currently prove about its runtime environment.
+        # Stage 1 is observational only and does not alter
+        # routing, policy, permissions, or execution.
+        system_context = self.system_context_builder.build(
+            capabilities.capabilities,
+            device,
+        )
+
+        # Step 6: Decide how Cauvis should execute the task.
         policy = self.policy_engine.evaluate(
             device,
             task,
         )
 
-        # Step 6: Convert reasoning into an executable
+        # Step 7: Convert reasoning into an executable
         # adaptive task plan.
         execution_plan = self.task_planner.build_plan(
             reasoning
@@ -165,6 +185,7 @@ class CauvisBrain:
             device=device,
             policy=policy,
             execution_plan=execution_plan,
+            system_context=system_context,
             metadata={
                 "capability_count": len(
                     capabilities.capabilities
@@ -227,6 +248,11 @@ class CauvisBrain:
                 ),
                 "execution_plan": (
                     analysis.execution_plan
+                ),
+                "system_context": (
+                    analysis.system_context.to_dict()
+                    if analysis.system_context
+                    else None
                 ),
             },
         )

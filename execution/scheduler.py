@@ -204,6 +204,35 @@ class WorkerScheduler:
                 error=error,
             )
 
+        return self.dispatch_to_worker(
+            worker,
+            task,
+        )
+
+    def dispatch_to_worker(
+        self,
+        worker: Worker,
+        task: WorkerTask,
+    ) -> SchedulerResult:
+        """
+        Dispatch a task to a specific already-selected worker.
+
+        This is used when the caller must preserve an explicit
+        worker choice, such as fallback execution.
+        """
+
+        if not worker.can_handle(task):
+            error = (
+                f"Worker '{worker.name}' cannot handle "
+                f"task '{task.name}'."
+            )
+
+            return SchedulerResult(
+                success=False,
+                worker_name=worker.name,
+                error=error,
+            )
+
         worker_result = worker.execute(task)
 
         record = DispatchRecord(
