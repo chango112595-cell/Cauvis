@@ -761,6 +761,44 @@ class CauvisOrchestrator:
         return sanitized
 
 
+    def _sanitize_response_presentation(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Remove redundant leading Cauvis speaker labels.
+
+        The CLI and other presentation layers own the visible
+        assistant label. Model output should contain answer content,
+        not an additional leading "Cauvis:" prefix.
+
+        Only leading labels are removed. Ordinary sentences that
+        mention Cauvis remain unchanged.
+        """
+
+        import re
+
+        sanitized = str(
+            text
+            if text is not None
+            else ""
+        ).strip()
+
+        sanitized = re.sub(
+            r"^(?:\s*cauvis\s*:\s*)+",
+            "",
+            sanitized,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        if not sanitized:
+            return (
+                "Cauvis did not generate a substantive response."
+            )
+
+        return sanitized
+
+
     def _initialize_beta_ai(self) -> None:
         """
         Build the real Beta 1 AI path.
@@ -992,6 +1030,12 @@ class CauvisOrchestrator:
                         safe_model_text
                     )
                 )
+
+            safe_model_text = (
+                self._sanitize_response_presentation(
+                    safe_model_text
+                )
+            )
 
             self.conversation.append(
                 context.session_id,

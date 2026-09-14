@@ -9409,6 +9409,160 @@ def test_developer_capability_building_boundary():
     return True
 
 
+
+# ============================================================
+# TEST 64 - RESPONSE PRESENTATION PREFIX NORMALIZATION
+# ============================================================
+
+def test_response_presentation_prefix_normalization():
+    """
+    Verify redundant leading Cauvis speaker labels are removed
+    before user display and conversation-history storage.
+    """
+
+    from core.config import CauvisConfig
+    from core.orchestrator import (
+        CauvisOrchestrator,
+    )
+    from intelligence.models import (
+        ModelResponse,
+    )
+    from intelligence.router import (
+        AIModelRouter,
+    )
+
+    responses = [
+        "Cauvis: Hello there.",
+        (
+            "Cauvis: Cauvis: Your location is "
+            "Bloomington, Indiana."
+        ),
+        "Cauvis is the name of the project.",
+        "cAuViS :   Final answer.",
+    ]
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(user_input)
+
+            return ModelResponse(
+                text=responses[
+                    len(calls) - 1
+                ],
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    session_id = (
+        "response-presentation-prefix-test"
+    )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id=session_id,
+    )
+
+    first = orchestrator.handle(
+        "Say hello."
+    )
+
+    assert first.status == "success"
+    assert first.message == "Hello there."
+
+    second = orchestrator.handle(
+        "What location did I mention?"
+    )
+
+    assert second.status == "success"
+
+    assert second.message == (
+        "Your location is Bloomington, Indiana."
+    )
+
+    rendered_cli_line = (
+        f"Cauvis: {second.message}"
+    )
+
+    assert rendered_cli_line == (
+        "Cauvis: Your location is Bloomington, Indiana."
+    )
+
+    assert "Cauvis: Cauvis:" not in rendered_cli_line
+
+    third = orchestrator.handle(
+        "What is Cauvis?"
+    )
+
+    assert third.status == "success"
+
+    # Ordinary content mentioning Cauvis must not be stripped.
+    assert (
+        third.message
+        == "Cauvis is the name of the project."
+    )
+
+    fourth = orchestrator.handle(
+        "Give me a final answer."
+    )
+
+    assert fourth.status == "success"
+    assert fourth.message == "Final answer."
+
+    history = (
+        orchestrator.conversation.render_context(
+            session_id
+        )
+    )
+
+    assert "Cauvis: Cauvis:" not in history
+    assert "Cauvis: Hello there." in history
+
+    assert (
+        "Cauvis: Your location is Bloomington, Indiana."
+        in history
+    )
+
+    assert (
+        "Cauvis: Cauvis is the name of the project."
+        in history
+    )
+
+    print(
+        "SINGLE PREFIX REMOVED:",
+        True,
+    )
+
+    print(
+        "REPEATED PREFIX REMOVED:",
+        True,
+    )
+
+    print(
+        "NORMAL CAUVIS SENTENCE PRESERVED:",
+        True,
+    )
+
+    print(
+        "HISTORY PRESENTATION CLEAN:",
+        True,
+    )
+
+    return True
+
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -9583,6 +9737,10 @@ tests = [
     (
         "Developer Capability-Building Boundary",
         test_developer_capability_building_boundary,
+    ),
+    (
+        "Response Presentation Prefix Normalization",
+        test_response_presentation_prefix_normalization,
     ),
 ]
 

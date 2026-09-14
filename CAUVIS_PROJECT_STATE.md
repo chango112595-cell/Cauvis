@@ -7036,4 +7036,111 @@ Desired behavior:
 
 ---
 
+# LIVE BETA ROUND 2 FIX CHECKPOINT — 64/64 VERIFIED
+
+## Round 2 Fix #5 — response presentation normalization
+
+Status: **COMPLETE**
+
+The live-beta duplicate speaker-prefix defect has been corrected.
+
+Observed symptom:
+
+`Cauvis: Cauvis: ...`
+
+Root cause:
+
+- the CLI owns the visible `Cauvis:` speaker label
+- an underlying model could also begin its response with `Cauvis:`
+- the two presentation layers could therefore duplicate the label
+
+The fix adds a deterministic response-presentation sanitizer in
+`core/orchestrator.py`.
+
+Behavior:
+
+- strips one or more redundant leading `Cauvis:` labels
+- handles mixed-case/whitespace variants
+- runs before assistant output is stored in conversation history
+- runs before assistant output is returned to the user
+- preserves ordinary sentences that merely mention Cauvis
+
+Examples:
+
+- `Cauvis: Hello.` -> `Hello.`
+- `Cauvis: Cauvis: Hello.` -> `Hello.`
+- `cAuViS : Hello.` -> `Hello.`
+- `Cauvis is the name of the project.` remains unchanged
+
+Permanent regression coverage:
+
+- Test 64 — `Response Presentation Prefix Normalization`
+
+## Current verified baseline
+
+Full `validate_cauvis.py` result after Round 2 Fix #5:
+
+```text
+PASSED:  64
+FAILED:  0
+TOTAL:   64
+STATUS: ALL TESTS PASSED
+```
+
+Validation elapsed time observed:
+
+`1.62 seconds`
+
+This **64/64** result is the current verified regression baseline.
+
+## Current Round 2 fix status
+
+Completed:
+
+1. internal prompt/context leakage
+2. factual boundary refinement
+3. session-memory provenance wording
+4. developer capability-building request classification
+5. duplicate Cauvis prefix / response presentation
+
+Remaining priority order:
+
+6. **Latency telemetry and performance diagnosis**
+7. **Broader multi-question completeness coverage**
+8. **Broader language-consistency coverage**
+9. **Remaining factual/entity uncertainty behavior**
+10. **Real retrieval execution/evidence bridge**
+
+## Immediate next step
+
+**NEXT: Round 2 Fix #6 — latency telemetry and performance diagnosis**
+
+Live beta previously showed approximate turn latency in the range of
+5–11 seconds.
+
+The next milestone should measure latency before changing performance
+behavior.
+
+Desired telemetry should distinguish at minimum:
+
+- total orchestrator turn time
+- deterministic guard/classification time
+- context construction time
+- CauvisBrain/model-generation time
+- provider/model identity for the turn
+- success/failure path
+- whether a deterministic guard returned before model generation
+
+Performance optimization should be based on measured timings rather
+than assumptions.
+
+Permanent regression coverage should verify that telemetry:
+
+- is present on successful model turns
+- is present on blocked deterministic turns where applicable
+- does not change answer correctness
+- does not falsely imply external execution or verification
+
+---
+
 # END OF SOURCE-OF-TRUTH FILE
