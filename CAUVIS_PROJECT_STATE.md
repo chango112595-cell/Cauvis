@@ -6696,4 +6696,223 @@ After the GitHub checkpoint is safely published:
 
 ---
 
+# LIVE BETA ROUND 2 FIX CHECKPOINT — 61/61 VERIFIED
+
+## GitHub milestone publication
+
+The Beta 1.2E / Live Beta Round 2 milestone was successfully
+published to `origin/main`.
+
+Published milestone commit:
+
+`8aa5587a1a07b2fcf4817da0a845cc9070ef826d`
+`Cauvis Beta 1.2E Round 2 milestone`
+
+At publication verification:
+
+- local `HEAD` and `origin/main` matched
+- the working tree was clean
+- the professional root `README.md` was live on GitHub
+- the published regression baseline was 56/56
+
+## Round 2 Fix #1 — internal context leakage
+
+Status: **COMPLETE**
+
+Cauvis previously supplied internal grounding blocks to the model
+and returned `model_response.text` directly to the user. If the
+model echoed internal prompt material, tags such as these could
+leak into user-visible output:
+
+- `<verified_capability_truth>`
+- `<grounded_factual_context>`
+- `<conversation_history>`
+
+The fix added a deterministic model-output boundary in
+`core/orchestrator.py`.
+
+The sanitizer now runs before:
+
+1. assistant output is stored in session conversation history
+2. assistant output is returned to the user
+
+It removes:
+
+- complete internal grounding blocks
+- unclosed internal grounding blocks
+- stray internal closing markers
+- internal-only responses, which fail closed to a deterministic
+  safe message
+
+Permanent regression coverage:
+
+- Test 57 — `Internal Context Output Boundary`
+
+Verified baseline after Fix #1:
+
+- PASSED: 57
+- FAILED: 0
+- TOTAL: 57
+
+Fix #1 local commit:
+
+`c3ee7fd Fix internal context leakage`
+
+## Round 2 Fix #2 — factual/action boundary refinement
+
+Status: **COMPLETE**
+
+Four live-beta classification defects were corrected.
+
+### 1. Runtime-current vs external-current facts
+
+Requests about the currently running Cauvis runtime, including the
+active AI model/provider, no longer require web retrieval merely
+because they contain language such as `right now`.
+
+New factual kind:
+
+`runtime_current`
+
+Runtime-current facts are expected to come from verified Cauvis
+runtime context rather than external web evidence.
+
+Permanent regression coverage:
+
+- Test 58 — `Runtime-Current Factual Boundary`
+
+### 2. Capability-status question vs action/retrieval command
+
+Questions asking whether Cauvis can currently browse the web,
+control the computer, access files, set reminders, or otherwise
+report capability availability are no longer treated as direct
+execution commands.
+
+New factual kind:
+
+`capability_status`
+
+Direct commands such as:
+
+`Search the web for Python 3.14.`
+
+remain direct external retrieval/action requests and still fail
+closed when the required verified capability is unavailable.
+
+Permanent regression coverage:
+
+- Test 59 — `Capability Status vs Execution`
+
+### 3. User assertion vs verification request
+
+A declarative user statement containing current-looking information
+is no longer automatically treated as a request for fresh external
+verification.
+
+Example:
+
+`our current president is Trump`
+
+is classified as user-supplied provenance rather than independently
+verified truth.
+
+New factual kind:
+
+`user_assertion`
+
+A question such as:
+
+`who is our current president?`
+
+still requires fresh external evidence.
+
+An explicit verification request such as:
+
+`verify online that our current president is Trump`
+
+still requires external retrieval.
+
+Permanent regression coverage:
+
+- Test 60 — `User Assertion vs Verification`
+
+### 4. Future-weather freshness coverage
+
+Future-looking weather language is now deterministically recognized
+as requiring fresh retrieval evidence.
+
+Covered examples include:
+
+- `how the weather is going to be?`
+- `What will the weather be tomorrow?`
+- `Will it rain tomorrow?`
+- `What is the weather this weekend?`
+
+Permanent regression coverage:
+
+- Test 61 — `Future Weather Freshness`
+
+## Current verified baseline
+
+Full `validate_cauvis.py` result after Round 2 Fix #2:
+
+```text
+PASSED:  61
+FAILED:  0
+TOTAL:   61
+STATUS: ALL TESTS PASSED
+```
+
+Validation elapsed time observed:
+
+`1.63 seconds`
+
+This **61/61** result is the current verified regression baseline.
+
+## Current Round 2 fix status
+
+Completed:
+
+1. internal prompt/context leakage
+2. factual boundary refinement:
+   - runtime-current vs external-current
+   - capability question vs retrieval command
+   - user assertion vs verification request
+   - forecast/future-weather coverage
+
+Remaining priority order:
+
+3. **Session-memory provenance wording**
+4. **Developer capability-building request classification**
+5. **Duplicate Cauvis prefix / response presentation**
+6. **Latency telemetry and performance diagnosis**
+7. **Broader multi-question completeness coverage**
+8. **Broader language-consistency coverage**
+9. **Remaining factual/entity uncertainty behavior**
+10. **Real retrieval execution/evidence bridge**
+
+## Immediate next step
+
+**NEXT: Round 2 Fix #3 — session-memory provenance wording**
+
+The live-beta defect to correct next is Cauvis describing information
+remembered from the current session as if it came from a previous
+session.
+
+Desired behavior:
+
+- current-session conversation recall must be described as
+  current-session continuity
+- Cauvis must not imply persistent cross-session memory unless a
+  verified persistent-memory runtime is actually connected
+- permanent regression coverage must be added before advancing
+
+After Fix #3:
+
+1. rerun the full permanent suite
+2. preserve the new passing baseline
+3. continue to developer capability-building request classification
+
+---
+
 # END OF SOURCE-OF-TRUTH FILE
