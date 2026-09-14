@@ -8515,6 +8515,208 @@ def test_deterministic_factual_freshness_guard():
     return True
 
 
+
+# ============================================================
+# TEST 57 - INTERNAL CONTEXT OUTPUT BOUNDARY
+# ============================================================
+
+def test_internal_context_output_boundary():
+    # Verify internal orchestration context is model-input-only.
+    #
+    # If a model echoes internal runtime blocks, Cauvis must:
+    # - remove them before returning text to the user
+    # - remove them before storing assistant conversation history
+    # - preserve normal non-internal answer text
+    # - fail closed when the response is only leaked context
+
+    from core.config import CauvisConfig
+    from core.orchestrator import (
+        CauvisOrchestrator,
+    )
+    from intelligence.models import (
+        ModelResponse,
+    )
+    from intelligence.router import (
+        AIModelRouter,
+    )
+
+    responses = [
+        (
+            "Normal answer before.\n\n"
+            "<verified_capability_truth>\n"
+            "SECRET_CAPABILITY_DATA\n"
+            "</verified_capability_truth>\n\n"
+            "Normal answer after.\n\n"
+            "<conversation_history>\n"
+            "SECRET_HISTORY_DATA\n"
+            "</conversation_history>"
+        ),
+        (
+            "Visible prefix.\n"
+            "<grounded_factual_context>\n"
+            "SECRET_UNCLOSED_FACT_DATA"
+        ),
+        (
+            "<verified_capability_truth>\n"
+            "SECRET_ONLY_INTERNAL_DATA\n"
+            "</verified_capability_truth>"
+        ),
+        (
+            "SECRET_STRAY_HISTORY_DATA\n"
+            "</conversation_history>\n"
+            "Visible suffix."
+        ),
+    ]
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                {
+                    "user_input": user_input,
+                    "system_prompt": system_prompt,
+                }
+            )
+
+            response_text = responses[
+                len(calls) - 1
+            ]
+
+            return ModelResponse(
+                text=response_text,
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    session_id = (
+        "beta12e-output-boundary-validator"
+    )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id=session_id,
+    )
+
+    first = orchestrator.handle(
+        "Give me a normal answer."
+    )
+
+    assert first.status == "success"
+    assert "Normal answer before." in first.message
+    assert "Normal answer after." in first.message
+
+    forbidden_values = (
+        "<verified_capability_truth>",
+        "</verified_capability_truth>",
+        "<grounded_factual_context>",
+        "</grounded_factual_context>",
+        "<conversation_history>",
+        "</conversation_history>",
+        "SECRET_CAPABILITY_DATA",
+        "SECRET_HISTORY_DATA",
+        "SECRET_UNCLOSED_FACT_DATA",
+        "SECRET_ONLY_INTERNAL_DATA",
+        "SECRET_STRAY_HISTORY_DATA",
+    )
+
+    for forbidden in forbidden_values:
+        assert forbidden not in first.message
+
+    second = orchestrator.handle(
+        "Give me another normal answer."
+    )
+
+    assert second.status == "success"
+    assert second.message == "Visible prefix."
+
+    for forbidden in forbidden_values:
+        assert forbidden not in second.message
+
+    third = orchestrator.handle(
+        "Give me a third normal answer."
+    )
+
+    assert third.status == "success"
+
+    assert third.message == (
+        "Cauvis withheld a model response because it "
+        "contained internal runtime context."
+    )
+
+    for forbidden in forbidden_values:
+        assert forbidden not in third.message
+
+    fourth = orchestrator.handle(
+        "Give me a fourth normal answer."
+    )
+
+    assert fourth.status == "success"
+    assert fourth.message == "Visible suffix."
+
+    for forbidden in forbidden_values:
+        assert forbidden not in fourth.message
+
+    history = (
+        orchestrator.conversation.render_context(
+            session_id
+        )
+    )
+
+    for forbidden in forbidden_values:
+        assert forbidden not in history
+
+    assert "Normal answer before." in history
+    assert "Visible prefix." in history
+    assert "Cauvis withheld a model response" in history
+    assert "Visible suffix." in history
+
+    assert len(calls) == 4
+
+    assert (
+        "<verified_capability_truth>"
+        in calls[0]["system_prompt"]
+    )
+
+    print(
+        "OUTPUT BLOCK SANITIZED:",
+        True,
+    )
+
+    print(
+        "UNCLOSED BLOCK SANITIZED:",
+        True,
+    )
+
+    print(
+        "INTERNAL-ONLY RESPONSE WITHHELD:",
+        True,
+    )
+
+    print(
+        "STRAY CLOSING TAG SANITIZED:",
+        True,
+    )
+
+    print(
+        "HISTORY LEAK PREVENTED:",
+        True,
+    )
+
+    return True
+
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -8661,6 +8863,10 @@ tests = [
     (
         "Deterministic Factual Freshness Guard",
         test_deterministic_factual_freshness_guard,
+    ),
+    (
+        "Internal Context Output Boundary",
+        test_internal_context_output_boundary,
     ),
 ]
 

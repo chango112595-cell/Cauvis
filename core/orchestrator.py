@@ -549,6 +549,106 @@ class CauvisOrchestrator:
             + "\n</conversation_history>"
         )
 
+    def _sanitize_model_output(
+        self,
+        text: str,
+    ) -> str:
+        # Remove internal orchestration context from model output.
+        #
+        # Internal grounding blocks are model-input-only data.
+        # They must never be exposed to the user or persisted into
+        # assistant conversation history if a model echoes them.
+        #
+        # This boundary is deterministic and provider-independent.
+
+        sanitized = str(
+            text
+            if text is not None
+            else ""
+        )
+
+        internal_sections = (
+            "verified_capability_truth",
+            "grounded_factual_context",
+            "conversation_history",
+        )
+
+        for section in internal_sections:
+            opening_tag = f"<{section}>"
+            closing_tag = f"</{section}>"
+
+            while opening_tag in sanitized:
+                start = sanitized.find(
+                    opening_tag
+                )
+
+                end = sanitized.find(
+                    closing_tag,
+                    start + len(opening_tag),
+                )
+
+                if end == -1:
+                    sanitized = sanitized[
+                        :start
+                    ]
+                    break
+
+                sanitized = (
+                    sanitized[:start]
+                    + sanitized[
+                        end + len(closing_tag):
+                    ]
+                )
+
+            # A stray closing marker means the model may have
+            # started echoing from inside an internal block. In that
+            # case, everything through the closing marker is treated
+            # as internal and discarded; any normal suffix remains.
+            while closing_tag in sanitized:
+                end = sanitized.find(
+                    closing_tag
+                )
+
+                sanitized = sanitized[
+                    end + len(closing_tag):
+                ]
+
+        lines = [
+            line.rstrip()
+            for line in sanitized.splitlines()
+        ]
+
+        normalized_lines = []
+        previous_blank = False
+
+        for line in lines:
+            is_blank = not line.strip()
+
+            if (
+                is_blank
+                and previous_blank
+            ):
+                continue
+
+            normalized_lines.append(
+                line
+            )
+
+            previous_blank = is_blank
+
+        sanitized = "\n".join(
+            normalized_lines
+        ).strip()
+
+        if not sanitized:
+            return (
+                "Cauvis withheld a model response because it "
+                "contained internal runtime context."
+            )
+
+        return sanitized
+
+
     def _initialize_beta_ai(self) -> None:
         """
         Build the real Beta 1 AI path.
@@ -768,15 +868,21 @@ class CauvisOrchestrator:
             )
 
         if model_response.success:
+            safe_model_text = (
+                self._sanitize_model_output(
+                    model_response.text
+                )
+            )
+
             self.conversation.append(
                 context.session_id,
                 "assistant",
-                model_response.text,
+                safe_model_text,
             )
 
             return CauvisResponse(
                 status="success",
-                message=model_response.text,
+                message=safe_model_text,
                 intent=intent.name,
                 confidence=intent.confidence,
                 data={
