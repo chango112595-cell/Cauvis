@@ -8717,6 +8717,338 @@ def test_internal_context_output_boundary():
     return True
 
 
+
+# ============================================================
+# TEST 58 - RUNTIME-CURRENT FACTUAL BOUNDARY
+# ============================================================
+
+def test_runtime_current_boundary():
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.factual_boundary import (
+        FactualBoundaryClassifier,
+        FactualRequestKind,
+    )
+    from intelligence.models import ModelResponse
+    from intelligence.router import AIModelRouter
+
+    classifier = FactualBoundaryClassifier()
+
+    prompt = (
+        "Who are you, who created you, and what AI model "
+        "are you using right now?"
+    )
+
+    decision = classifier.classify(prompt)
+
+    assert decision.kind == FactualRequestKind.RUNTIME_CURRENT
+    assert decision.requires_fresh_evidence is False
+    assert decision.requires_retrieval is False
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(user_input)
+
+            return ModelResponse(
+                text="RUNTIME CURRENT RESPONSE",
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="runtime-current-boundary-test",
+    )
+
+    response = orchestrator.handle(prompt)
+
+    assert response.status == "success"
+    assert response.message == "RUNTIME CURRENT RESPONSE"
+    assert calls == [prompt]
+
+    print("RUNTIME CURRENT KIND:", decision.kind.value)
+    print("WEB RETRIEVAL REQUIRED:", decision.requires_retrieval)
+
+    return True
+
+
+# ============================================================
+# TEST 59 - CAPABILITY STATUS VS EXECUTION
+# ============================================================
+
+def test_capability_status_vs_execution():
+    from core.action_request import ActionRequestDetector
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.factual_boundary import (
+        FactualBoundaryClassifier,
+        FactualRequestKind,
+    )
+    from intelligence.models import ModelResponse
+    from intelligence.router import AIModelRouter
+
+    detector = ActionRequestDetector()
+    classifier = FactualBoundaryClassifier()
+
+    capability_prompts = (
+        (
+            "Can you browse the web, control my computer, "
+            "access my files, and set reminders right now?"
+        ),
+        (
+            "Can you browse the web, control my computer, "
+            "access my files, or set reminders in this "
+            "running Cauvis instance?"
+        ),
+        "Can you browse the web right now?",
+        (
+            "Which capabilities are available in this "
+            "running Cauvis instance?"
+        ),
+    )
+
+    for prompt in capability_prompts:
+        action = detector.detect(prompt)
+
+        assert action.requested is False
+
+        decision = classifier.classify(prompt)
+
+        assert decision.kind == FactualRequestKind.CAPABILITY_STATUS
+        assert decision.requires_fresh_evidence is False
+        assert decision.requires_retrieval is False
+
+    direct = detector.detect(
+        "Can you search the web for Python 3.14?"
+    )
+
+    assert direct.requested is True
+    assert direct.category == "web"
+
+    retrieval = classifier.classify(
+        "Search the web for Python 3.14."
+    )
+
+    assert retrieval.kind == FactualRequestKind.EXPLICIT_RETRIEVAL
+    assert retrieval.requires_retrieval is True
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(user_input)
+
+            return ModelResponse(
+                text="CAPABILITY STATUS RESPONSE",
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="capability-status-test",
+    )
+
+    response = orchestrator.handle(
+        capability_prompts[0]
+    )
+
+    assert response.status == "success"
+    assert response.message == "CAPABILITY STATUS RESPONSE"
+    assert calls == [capability_prompts[0]]
+
+    print("CAPABILITY QUESTIONS:", len(capability_prompts))
+    print("DIRECT RETRIEVAL STILL ACTION:", direct.requested)
+
+    return True
+
+
+# ============================================================
+# TEST 60 - USER ASSERTION VS VERIFICATION
+# ============================================================
+
+def test_user_assertion_vs_verification():
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.factual_boundary import (
+        FactualBoundaryClassifier,
+        FactualRequestKind,
+    )
+    from intelligence.models import ModelResponse
+    from intelligence.router import AIModelRouter
+
+    classifier = FactualBoundaryClassifier()
+
+    assertion = classifier.classify(
+        "our current president is Trump"
+    )
+
+    assert assertion.kind == FactualRequestKind.USER_ASSERTION
+    assert assertion.requires_fresh_evidence is False
+    assert assertion.requires_retrieval is False
+
+    question = classifier.classify(
+        "who is our current president?"
+    )
+
+    assert question.kind == FactualRequestKind.CURRENT
+    assert question.requires_fresh_evidence is True
+    assert question.requires_retrieval is True
+
+    verification = classifier.classify(
+        "verify online that our current president is Trump"
+    )
+
+    assert verification.kind == FactualRequestKind.EXPLICIT_RETRIEVAL
+    assert verification.requires_retrieval is True
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(user_input)
+
+            return ModelResponse(
+                text="USER ASSERTION ACKNOWLEDGED",
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="user-assertion-boundary-test",
+    )
+
+    response = orchestrator.handle(
+        "our current president is Trump"
+    )
+
+    assert response.status == "success"
+    assert response.message == "USER ASSERTION ACKNOWLEDGED"
+    assert calls == ["our current president is Trump"]
+
+    blocked = orchestrator.handle(
+        "who is our current president?"
+    )
+
+    assert blocked.status == "blocked"
+    assert len(calls) == 1
+
+    print("ASSERTION KIND:", assertion.kind.value)
+    print("QUESTION KIND:", question.kind.value)
+    print("ASSERTION MODEL PATH:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 61 - FUTURE WEATHER FRESHNESS
+# ============================================================
+
+def test_future_weather_freshness():
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.factual_boundary import (
+        FactualBoundaryClassifier,
+        FactualRequestKind,
+    )
+    from intelligence.models import ModelResponse
+    from intelligence.router import AIModelRouter
+
+    classifier = FactualBoundaryClassifier()
+
+    future_prompts = (
+        "how the weather is going to be?",
+        "What will the weather be tomorrow?",
+        "Will it rain tomorrow?",
+        "What is the weather this weekend?",
+    )
+
+    for prompt in future_prompts:
+        decision = classifier.classify(prompt)
+
+        assert decision.kind == FactualRequestKind.CURRENT
+        assert decision.requires_fresh_evidence is True
+        assert decision.requires_retrieval is True
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(user_input)
+
+            return ModelResponse(
+                text="MODEL SHOULD NOT BE CALLED",
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="future-weather-boundary-test",
+    )
+
+    response = orchestrator.handle(
+        "how the weather is going to be?"
+    )
+
+    assert response.status == "blocked"
+    assert response.data["requires_fresh_evidence"] is True
+    assert response.data["requires_retrieval"] is True
+    assert calls == []
+
+    print("FUTURE WEATHER CASES:", len(future_prompts))
+    print("MODEL CALLS:", len(calls))
+
+    return True
+
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -8867,6 +9199,22 @@ tests = [
     (
         "Internal Context Output Boundary",
         test_internal_context_output_boundary,
+    ),
+    (
+        "Runtime-Current Factual Boundary",
+        test_runtime_current_boundary,
+    ),
+    (
+        "Capability Status vs Execution",
+        test_capability_status_vs_execution,
+    ),
+    (
+        "User Assertion vs Verification",
+        test_user_assertion_vs_verification,
+    ),
+    (
+        "Future Weather Freshness",
+        test_future_weather_freshness,
     ),
 ]
 
