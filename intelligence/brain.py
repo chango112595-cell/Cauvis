@@ -1,5 +1,6 @@
-from dataclasses import dataclass, field
+﻿from dataclasses import dataclass, field
 from typing import Any
+import time
 
 from intelligence.models import ModelRequest, ModelResponse
 from intelligence.router import AIModelRouter
@@ -219,9 +220,17 @@ class CauvisBrain:
         but execution remains outside the brain.
         """
 
+        think_started = time.perf_counter()
+
+        analysis_started = time.perf_counter()
+
         analysis = self.analyze(
             user_input
         )
+
+        brain_analysis_ms = (
+            time.perf_counter() - analysis_started
+        ) * 1000.0
 
         request = ModelRequest(
             prompt=analysis.reasoning.goal,
@@ -257,6 +266,8 @@ class CauvisBrain:
             },
         )
 
+        router_started = time.perf_counter()
+
         response = self.router.generate(
             request=request,
             policy=analysis.policy,
@@ -266,9 +277,29 @@ class CauvisBrain:
             provider_name=provider_name,
         )
 
+        router_generation_ms = (
+            time.perf_counter() - router_started
+        ) * 1000.0
+
+        brain_total_ms = (
+            time.perf_counter() - think_started
+        ) * 1000.0
+
         # Add Cauvis analysis information to the response.
         response.metadata.update(
             {
+                "brain_analysis_ms": round(
+                    brain_analysis_ms,
+                    3,
+                ),
+                "router_generation_ms": round(
+                    router_generation_ms,
+                    3,
+                ),
+                "brain_total_ms": round(
+                    brain_total_ms,
+                    3,
+                ),
                 "execution_strategy": (
                     analysis.policy.strategy.value
                 ),

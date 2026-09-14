@@ -9563,6 +9563,342 @@ def test_response_presentation_prefix_normalization():
     return True
 
 
+
+# ============================================================
+# TEST 65 - TURN LATENCY TELEMETRY
+# ============================================================
+
+def test_turn_latency_telemetry():
+    """
+    Verify observational timing telemetry is transported through
+    router, brain, and orchestrator paths without changing answer
+    correctness or external-action truth.
+    """
+
+    from types import SimpleNamespace
+
+    from core.config import CauvisConfig
+    from core.orchestrator import (
+        CauvisOrchestrator,
+    )
+    from intelligence.brain import CauvisBrain
+    from intelligence.models import (
+        ModelRequest,
+        ModelResponse,
+    )
+    from intelligence.router import (
+        AIModelRouter,
+        ModelProvider,
+    )
+
+    # --------------------------------------------------------
+    # Router provider latency must be attached to the actual
+    # ModelResponse as observational metadata.
+    # --------------------------------------------------------
+
+    class TelemetryProvider(ModelProvider):
+        name = "telemetry-provider"
+        model = "telemetry-model"
+        capabilities = set()
+        provider_types = {
+            "local",
+        }
+
+        def generate(
+            self,
+            request,
+        ):
+            return ModelResponse(
+                text="TELEMETRY PROVIDER RESPONSE",
+                model=self.model,
+                provider=self.name,
+                success=True,
+            )
+
+    router = AIModelRouter()
+    router.register_provider(
+        TelemetryProvider()
+    )
+
+    routed = router.generate(
+        ModelRequest(
+            prompt="telemetry router test"
+        )
+    )
+
+    assert routed.success is True
+
+    provider_latency = (
+        routed.metadata.get(
+            "provider_latency_ms"
+        )
+    )
+
+    assert isinstance(
+        provider_latency,
+        (int, float),
+    )
+
+    assert provider_latency >= 0.0
+
+    # --------------------------------------------------------
+    # CauvisBrain must expose analysis, router-generation, and
+    # total-brain timings in response metadata.
+    # --------------------------------------------------------
+
+    brain = CauvisBrain(
+        router
+    )
+
+    fake_analysis = SimpleNamespace(
+        reasoning=SimpleNamespace(
+            goal="telemetry brain test",
+            steps=(),
+            requires_tools=False,
+            requires_verification=False,
+        ),
+        task=SimpleNamespace(
+            complexity=SimpleNamespace(
+                value="low"
+            )
+        ),
+        capabilities=SimpleNamespace(
+            capabilities=set()
+        ),
+        policy=SimpleNamespace(
+            strategy=SimpleNamespace(
+                value="test"
+            ),
+            reason="telemetry test",
+        ),
+        execution_plan=SimpleNamespace(
+            tasks=(),
+            metadata={},
+        ),
+        system_context=None,
+    )
+
+    brain.analyze = (
+        lambda user_input: fake_analysis
+    )
+
+    brain_response = brain.think(
+        "telemetry brain test"
+    )
+
+    assert brain_response.success is True
+
+    for key in (
+        "brain_analysis_ms",
+        "router_generation_ms",
+        "brain_total_ms",
+        "provider_latency_ms",
+    ):
+        value = (
+            brain_response.metadata.get(
+                key
+            )
+        )
+
+        assert isinstance(
+            value,
+            (int, float),
+        )
+
+        assert value >= 0.0
+
+    # --------------------------------------------------------
+    # Orchestrator success path must expose stage timings plus
+    # provider/model identity and remain observational only.
+    # --------------------------------------------------------
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                user_input
+            )
+
+            return ModelResponse(
+                text="TELEMETRY SUCCESS",
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+                metadata={
+                    "brain_analysis_ms": 1.25,
+                    "router_generation_ms": 2.50,
+                    "brain_total_ms": 3.75,
+                    "provider_latency_ms": 2.00,
+                },
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="latency-telemetry-test",
+    )
+
+    success = orchestrator.handle(
+        "Say hello."
+    )
+
+    assert success.status == "success"
+    assert success.message == "TELEMETRY SUCCESS"
+
+    telemetry = success.data[
+        "telemetry"
+    ]
+
+    assert telemetry[
+        "path"
+    ] == "model_success"
+
+    assert telemetry[
+        "model_called"
+    ] is True
+
+    assert telemetry[
+        "deterministic_guard"
+    ] is None
+
+    assert telemetry[
+        "provider"
+    ] == "fake-provider"
+
+    assert telemetry[
+        "model"
+    ] == "fake-model"
+
+    assert telemetry[
+        "observational_only"
+    ] is True
+
+    for key in (
+        "total_turn_ms",
+        "guard_ms",
+        "context_ms",
+        "brain_model_ms",
+        "postprocess_ms",
+        "brain_analysis_ms",
+        "router_generation_ms",
+        "brain_total_ms",
+        "provider_latency_ms",
+    ):
+        value = telemetry[
+            key
+        ]
+
+        assert isinstance(
+            value,
+            (int, float),
+        )
+
+        assert value >= 0.0
+
+    assert (
+        telemetry[
+            "total_turn_ms"
+        ]
+        >= telemetry[
+            "brain_model_ms"
+        ]
+    )
+
+    # --------------------------------------------------------
+    # A deterministic external-action guard must report a
+    # blocked path with no model call and zero model timing.
+    # --------------------------------------------------------
+
+    blocked = orchestrator.handle(
+        "Open Notepad."
+    )
+
+    assert blocked.status == "blocked"
+
+    blocked_telemetry = (
+        blocked.data[
+            "telemetry"
+        ]
+    )
+
+    assert (
+        blocked_telemetry[
+            "path"
+        ]
+        == "blocked"
+    )
+
+    assert (
+        blocked_telemetry[
+            "model_called"
+        ]
+        is False
+    )
+
+    assert (
+        blocked_telemetry[
+            "deterministic_guard"
+        ]
+        == "external_action"
+    )
+
+    assert (
+        blocked_telemetry[
+            "brain_model_ms"
+        ]
+        == 0.0
+    )
+
+    assert (
+        blocked_telemetry[
+            "provider_latency_ms"
+        ]
+        is None
+    )
+
+    # Only the normal model turn called the fake brain.
+    assert calls == [
+        "Say hello."
+    ]
+
+    print(
+        "PROVIDER LATENCY TRANSPORT:",
+        True,
+    )
+
+    print(
+        "BRAIN TIMINGS:",
+        True,
+    )
+
+    print(
+        "SUCCESS TURN TELEMETRY:",
+        True,
+    )
+
+    print(
+        "BLOCKED TURN TELEMETRY:",
+        True,
+    )
+
+    print(
+        "OBSERVATIONAL ONLY:",
+        True,
+    )
+
+    return True
+
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -9741,6 +10077,10 @@ tests = [
     (
         "Response Presentation Prefix Normalization",
         test_response_presentation_prefix_normalization,
+    ),
+    (
+        "Turn Latency Telemetry",
+        test_turn_latency_telemetry,
     ),
 ]
 

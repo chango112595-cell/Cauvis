@@ -1,4 +1,5 @@
 ﻿import os
+import time
 from collections.abc import Mapping
 
 from core.config import CauvisConfig
@@ -799,6 +800,119 @@ class CauvisOrchestrator:
         return sanitized
 
 
+    @staticmethod
+    def _elapsed_ms(
+        started: float,
+    ) -> float:
+        return round(
+            (
+                time.perf_counter()
+                - float(started)
+            )
+            * 1000.0,
+            3,
+        )
+
+    def _build_turn_telemetry(
+        self,
+        *,
+        turn_started: float,
+        guard_ms: float,
+        context_ms: float,
+        brain_model_ms: float,
+        postprocess_ms: float,
+        path: str,
+        model_called: bool,
+        deterministic_guard: str | None = None,
+        model_response=None,
+    ) -> dict[str, object]:
+        """
+        Build observational per-turn timing telemetry.
+
+        Timings describe measured runtime duration only.
+        They do not prove factual correctness, external execution,
+        or outcome verification.
+        """
+
+        metadata = (
+            dict(model_response.metadata)
+            if model_response is not None
+            else {}
+        )
+
+        return {
+            "total_turn_ms": self._elapsed_ms(
+                turn_started
+            ),
+            "guard_ms": round(
+                max(
+                    0.0,
+                    float(guard_ms),
+                ),
+                3,
+            ),
+            "context_ms": round(
+                max(
+                    0.0,
+                    float(context_ms),
+                ),
+                3,
+            ),
+            "brain_model_ms": round(
+                max(
+                    0.0,
+                    float(brain_model_ms),
+                ),
+                3,
+            ),
+            "postprocess_ms": round(
+                max(
+                    0.0,
+                    float(postprocess_ms),
+                ),
+                3,
+            ),
+            "brain_analysis_ms": (
+                metadata.get(
+                    "brain_analysis_ms"
+                )
+            ),
+            "router_generation_ms": (
+                metadata.get(
+                    "router_generation_ms"
+                )
+            ),
+            "brain_total_ms": (
+                metadata.get(
+                    "brain_total_ms"
+                )
+            ),
+            "provider_latency_ms": (
+                metadata.get(
+                    "provider_latency_ms"
+                )
+            ),
+            "provider": (
+                model_response.provider
+                if model_response is not None
+                else None
+            ),
+            "model": (
+                model_response.model
+                if model_response is not None
+                else None
+            ),
+            "path": str(path),
+            "model_called": bool(
+                model_called
+            ),
+            "deterministic_guard": (
+                deterministic_guard
+            ),
+            "observational_only": True,
+        }
+
+
     def _initialize_beta_ai(self) -> None:
         """
         Build the real Beta 1 AI path.
@@ -872,6 +986,8 @@ class CauvisOrchestrator:
         )
 
     def handle(self, user_input: str) -> CauvisResponse:
+        turn_started = time.perf_counter()
+
         context = ExecutionContext(
             user_input=user_input,
             session_id=self.session_id,
@@ -933,6 +1049,8 @@ class CauvisOrchestrator:
         # Deterministic external-action truth boundary
         # -----------------------------------------------------
 
+        guard_started = time.perf_counter()
+
         action_guard_response = (
             self._guard_external_action_request(
                 user_input,
@@ -941,6 +1059,25 @@ class CauvisOrchestrator:
         )
 
         if action_guard_response is not None:
+            guard_ms = self._elapsed_ms(
+                guard_started
+            )
+
+            action_guard_response.data[
+                "telemetry"
+            ] = self._build_turn_telemetry(
+                turn_started=turn_started,
+                guard_ms=guard_ms,
+                context_ms=0.0,
+                brain_model_ms=0.0,
+                postprocess_ms=0.0,
+                path="blocked",
+                model_called=False,
+                deterministic_guard=(
+                    "external_action"
+                ),
+            )
+
             return action_guard_response
 
         # -----------------------------------------------------
@@ -955,11 +1092,36 @@ class CauvisOrchestrator:
         )
 
         if freshness_guard_response is not None:
+            guard_ms = self._elapsed_ms(
+                guard_started
+            )
+
+            freshness_guard_response.data[
+                "telemetry"
+            ] = self._build_turn_telemetry(
+                turn_started=turn_started,
+                guard_ms=guard_ms,
+                context_ms=0.0,
+                brain_model_ms=0.0,
+                postprocess_ms=0.0,
+                path="blocked",
+                model_called=False,
+                deterministic_guard=(
+                    "factual_freshness"
+                ),
+            )
+
             return freshness_guard_response
+
+        guard_ms = self._elapsed_ms(
+            guard_started
+        )
 
         # -----------------------------------------------------
         # Deterministic factual grounding
         # -----------------------------------------------------
+
+        context_started = time.perf_counter()
 
         self._ground_explicit_user_facts(
             user_input=user_input,
@@ -993,6 +1155,12 @@ class CauvisOrchestrator:
             user_input,
         )
 
+        context_ms = self._elapsed_ms(
+            context_started
+        )
+
+        brain_started = time.perf_counter()
+
         try:
             model_response = self.brain.think(
                 user_input,
@@ -1000,6 +1168,20 @@ class CauvisOrchestrator:
             )
 
         except Exception as exc:
+            brain_model_ms = self._elapsed_ms(
+                brain_started
+            )
+
+            telemetry = self._build_turn_telemetry(
+                turn_started=turn_started,
+                guard_ms=guard_ms,
+                context_ms=context_ms,
+                brain_model_ms=brain_model_ms,
+                postprocess_ms=0.0,
+                path="model_exception",
+                model_called=True,
+            )
+
             return CauvisResponse(
                 status="error",
                 message=(
@@ -1014,8 +1196,17 @@ class CauvisOrchestrator:
                     "exception_type": (
                         type(exc).__name__
                     ),
+                    "telemetry": telemetry,
                 },
             )
+
+        brain_model_ms = self._elapsed_ms(
+            brain_started
+        )
+
+        postprocess_started = (
+            time.perf_counter()
+        )
 
         if model_response.success:
             safe_model_text = (
@@ -1043,6 +1234,21 @@ class CauvisOrchestrator:
                 safe_model_text,
             )
 
+            postprocess_ms = self._elapsed_ms(
+                postprocess_started
+            )
+
+            telemetry = self._build_turn_telemetry(
+                turn_started=turn_started,
+                guard_ms=guard_ms,
+                context_ms=context_ms,
+                brain_model_ms=brain_model_ms,
+                postprocess_ms=postprocess_ms,
+                path="model_success",
+                model_called=True,
+                model_response=model_response,
+            )
+
             return CauvisResponse(
                 status="success",
                 message=safe_model_text,
@@ -1067,6 +1273,7 @@ class CauvisOrchestrator:
                         bundle.to_dict()
                         for bundle in model_response.evidence
                     ],
+                    "telemetry": telemetry,
                 },
             )
 
@@ -1104,6 +1311,21 @@ class CauvisOrchestrator:
 
             status = "error"
 
+        postprocess_ms = self._elapsed_ms(
+            postprocess_started
+        )
+
+        telemetry = self._build_turn_telemetry(
+            turn_started=turn_started,
+            guard_ms=guard_ms,
+            context_ms=context_ms,
+            brain_model_ms=brain_model_ms,
+            postprocess_ms=postprocess_ms,
+            path="model_failure",
+            model_called=True,
+            model_response=model_response,
+        )
+
         return CauvisResponse(
             status=status,
             message=message,
@@ -1129,5 +1351,6 @@ class CauvisOrchestrator:
                     bundle.to_dict()
                     for bundle in model_response.evidence
                 ],
+                "telemetry": telemetry,
             },
         )

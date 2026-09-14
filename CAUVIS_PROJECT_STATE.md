@@ -7143,4 +7143,126 @@ Permanent regression coverage should verify that telemetry:
 
 ---
 
+# LIVE BETA ROUND 2 FIX CHECKPOINT — 65/65 VERIFIED
+
+## Round 2 Fix #6 — latency telemetry
+
+Status: **COMPLETE**
+
+Cauvis now records observational per-turn latency telemetry without
+changing routing, execution, factual boundaries, or answer behavior.
+
+Telemetry added across:
+
+- `intelligence/router.py`
+- `intelligence/brain.py`
+- `core/orchestrator.py`
+
+Provider timing:
+
+- real provider call latency is measured with `time.perf_counter()`
+- provider latency is transported on the actual `ModelResponse`
+- existing provider runtime health tracking is preserved
+
+Brain timing:
+
+- brain analysis duration
+- router/model generation duration
+- total `CauvisBrain.think()` duration
+
+Orchestrator timing:
+
+- total turn duration
+- deterministic guard/classification duration
+- context construction duration
+- brain/model duration
+- response post-processing duration
+- provider/model identity
+- success/blocked/failure path
+- whether the model was called
+- deterministic guard name when a turn is blocked
+
+Telemetry is explicitly observational only. It does not imply:
+
+- factual correctness
+- external execution
+- verification
+- successful tool use
+
+Permanent regression coverage:
+
+- Test 65 — `Turn Latency Telemetry`
+
+The regression test verifies:
+
+- provider latency transport
+- brain timing metadata
+- successful model-turn telemetry
+- deterministic blocked-turn telemetry
+- `model_called=False` for blocked actions
+- answer correctness remains unchanged
+
+## Current verified baseline
+
+Full `validate_cauvis.py` result after Round 2 Fix #6:
+
+```text
+PASSED:  65
+FAILED:  0
+TOTAL:   65
+STATUS: ALL TESTS PASSED
+```
+
+Validation elapsed time observed:
+
+`2.10 seconds`
+
+This **65/65** result is the current verified regression baseline.
+
+## Current Round 2 fix status
+
+Completed:
+
+1. internal prompt/context leakage
+2. factual boundary refinement
+3. session-memory provenance wording
+4. developer capability-building request classification
+5. duplicate Cauvis prefix / response presentation
+6. latency telemetry instrumentation
+
+Remaining priority order:
+
+7. **Broader multi-question completeness coverage**
+8. **Broader language-consistency coverage**
+9. **Remaining factual/entity uncertainty behavior**
+10. **Real retrieval execution/evidence bridge**
+
+## Immediate next step
+
+**NEXT: live latency diagnosis using the new telemetry**
+
+Run a short real-session probe against the currently configured
+Cauvis provider/runtime.
+
+Measure representative turns including:
+
+- a simple model response
+- a runtime-current identity/model question
+- a capability-status question
+- a current/future-weather request that should block before model use
+- a direct system action request that should block before model use
+
+Use the measurements to determine whether latency is primarily in:
+
+- deterministic guards
+- context construction
+- CauvisBrain analysis/planning
+- provider/model generation
+- response post-processing
+
+Do not optimize until the live telemetry identifies the dominant
+stage.
+
+---
+
 # END OF SOURCE-OF-TRUTH FILE

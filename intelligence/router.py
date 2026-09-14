@@ -849,6 +849,13 @@ class AIModelRouter:
             time.perf_counter() - started
         ) * 1000.0
 
+        response.metadata[
+            "provider_latency_ms"
+        ] = round(
+            latency_ms,
+            3,
+        )
+
         if response.success:
             self.provider_runtime.record_success(
                 provider.name,
