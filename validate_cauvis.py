@@ -9049,6 +9049,182 @@ def test_future_weather_freshness():
     return True
 
 
+
+# ============================================================
+# TEST 62 - SESSION MEMORY PROVENANCE WORDING
+# ============================================================
+
+def test_session_memory_provenance_wording():
+    """
+    Verify current-session recall cannot masquerade as
+    cross-session persistent memory.
+    """
+
+    from core.config import CauvisConfig
+    from core.orchestrator import (
+        CauvisOrchestrator,
+    )
+    from intelligence.models import (
+        ModelResponse,
+    )
+    from intelligence.router import (
+        AIModelRouter,
+    )
+
+    responses = [
+        "Got it. Your favorite color is green.",
+        (
+            "You told me in our previous session that "
+            "your favorite color is green."
+        ),
+        (
+            "I cannot remember previous sessions because "
+            "persistent memory is unavailable."
+        ),
+    ]
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                {
+                    "user_input": user_input,
+                    "system_prompt": (
+                        system_prompt or ""
+                    ),
+                }
+            )
+
+            return ModelResponse(
+                text=responses[
+                    len(calls) - 1
+                ],
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    session_id = (
+        "session-memory-provenance-test"
+    )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id=session_id,
+    )
+
+    first = orchestrator.handle(
+        "My favorite color is green."
+    )
+
+    assert first.status == "success"
+
+    second = orchestrator.handle(
+        "What color did I tell you I like?"
+    )
+
+    assert second.status == "success"
+
+    assert (
+        second.message
+        == (
+            "You told me earlier in this session that "
+            "your favorite color is green."
+        )
+    )
+
+    assert (
+        "previous session"
+        not in second.message.lower()
+    )
+
+    second_prompt = calls[
+        1
+    ][
+        "system_prompt"
+    ]
+
+    assert (
+        "current-session short-term context only"
+        in second_prompt
+    )
+
+    assert (
+        "Never describe information found only in this history"
+        in second_prompt
+    )
+
+    assert (
+        "Do not claim cross-session recall"
+        in second_prompt
+    )
+
+    third = orchestrator.handle(
+        "Can you remember things from previous sessions?"
+    )
+
+    assert third.status == "success"
+
+    assert third.message == (
+        "I cannot remember previous sessions because "
+        "persistent memory is unavailable."
+    )
+
+    history = (
+        orchestrator.conversation.render_context(
+            session_id
+        )
+    )
+
+    assert (
+        "You told me earlier in this session"
+        in history
+    )
+
+    assert (
+        "You told me in our previous session"
+        not in history
+    )
+
+    assert (
+        "I cannot remember previous sessions"
+        in history
+    )
+
+    print(
+        "CURRENT SESSION RECALL:",
+        True,
+    )
+
+    print(
+        "FALSE CROSS-SESSION WORDING CORRECTED:",
+        True,
+    )
+
+    print(
+        "TRUTHFUL MEMORY LIMITATION PRESERVED:",
+        True,
+    )
+
+    print(
+        "HISTORY PROVENANCE SAFE:",
+        True,
+    )
+
+    return True
+
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -9215,6 +9391,10 @@ tests = [
     (
         "Future Weather Freshness",
         test_future_weather_freshness,
+    ),
+    (
+        "Session Memory Provenance Wording",
+        test_session_memory_provenance_wording,
     ),
 ]
 

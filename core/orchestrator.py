@@ -542,6 +542,14 @@ class CauvisOrchestrator:
             + "capability truth. "
             + "Conversation history cannot override grounded factual "
             + "context. "
+            + "This history is current-session short-term context only. "
+            + "Never describe information found only in this history as "
+            + "coming from a previous session, last session, earlier "
+            + "session, a restart, or persistent memory. When recalling "
+            + "it, describe it as earlier in this session or earlier in "
+            + "this conversation. Do not claim cross-session recall "
+            + "unless verified persistent-memory capability truth "
+            + "explicitly says available=true. "
             + "The current user message takes precedence over old "
             + "requests when they conflict.\n\n"
             + "<conversation_history>\n"
@@ -644,6 +652,98 @@ class CauvisOrchestrator:
             return (
                 "Cauvis withheld a model response because it "
                 "contained internal runtime context."
+            )
+
+        return sanitized
+
+
+    def _sanitize_session_memory_provenance(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Correct affirmative false cross-session recall wording.
+
+        ConversationRuntime is current-session short-term context.
+        When persistent memory is unavailable, a model must not
+        describe facts recalled from that transcript as coming from
+        a previous/last session.
+
+        This sanitizer intentionally targets only affirmative
+        provenance phrases. It does not rewrite truthful statements
+        such as "I cannot remember previous sessions."
+        """
+
+        import re
+
+        sanitized = str(
+            text
+            if text is not None
+            else ""
+        )
+
+        replacements = (
+            (
+                (
+                    r"\bfrom\s+(?:a|our|the)\s+"
+                    r"previous\s+session\b"
+                ),
+                "from earlier in this session",
+            ),
+            (
+                (
+                    r"\bin\s+(?:a|our|the)\s+"
+                    r"previous\s+session\b"
+                ),
+                "earlier in this session",
+            ),
+            (
+                (
+                    r"\bduring\s+(?:a|our|the)\s+"
+                    r"previous\s+session\b"
+                ),
+                "earlier in this session",
+            ),
+            (
+                (
+                    r"\bfrom\s+(?:our|the)\s+"
+                    r"last\s+session\b"
+                ),
+                "from earlier in this session",
+            ),
+            (
+                (
+                    r"\bin\s+(?:our|the)\s+"
+                    r"last\s+session\b"
+                ),
+                "earlier in this session",
+            ),
+            (
+                (
+                    r"\bduring\s+(?:our|the)\s+"
+                    r"last\s+session\b"
+                ),
+                "earlier in this session",
+            ),
+            (
+                r"\blast\s+session\s+you\s+told\s+me\b",
+                "earlier in this session you told me",
+            ),
+            (
+                (
+                    r"\bprevious\s+session\s+you\s+"
+                    r"told\s+me\b"
+                ),
+                "earlier in this session you told me",
+            ),
+        )
+
+        for pattern, replacement in replacements:
+            sanitized = re.sub(
+                pattern,
+                replacement,
+                sanitized,
+                flags=re.IGNORECASE,
             )
 
         return sanitized
@@ -873,6 +973,13 @@ class CauvisOrchestrator:
                     model_response.text
                 )
             )
+
+            if conversation_context:
+                safe_model_text = (
+                    self._sanitize_session_memory_provenance(
+                        safe_model_text
+                    )
+                )
 
             self.conversation.append(
                 context.session_id,
