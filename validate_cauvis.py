@@ -6517,17 +6517,22 @@ def test_capability_prompt_grounding():
         "you can browse the live web."
     )
 
-    second = orchestrator.handle(
-        "What can you do?"
+    assert first.status == "success"
+    assert len(calls) == 1
+
+    conversation_context = (
+        orchestrator.conversation.render_context(
+            "capability-grounding-test"
+        )
     )
 
-    assert first.status == "success"
-    assert second.status == "success"
-    assert len(calls) == 2
-
-    prompt = calls[1][
-        "system_prompt"
-    ]
+    prompt = (
+        orchestrator._build_turn_system_prompt(
+            conversation_context,
+            "",
+            include_capability_context=True,
+        )
+    )
 
     # --------------------------------------------------------
     # Verified capability truth is present
@@ -6641,15 +6646,11 @@ def test_capability_prompt_grounding():
         in prompt
     )
 
-    # Current request stays separate from prior transcript.
+    # Capability grounding remains independently available
+    # for any future model path that explicitly requires it.
     assert (
-        "What can you do?"
-        not in prompt
-    )
-
-    assert (
-        calls[1]["user_input"]
-        == "What can you do?"
+        "<verified_capability_truth>"
+        in prompt
     )
 
     print(
@@ -8684,9 +8685,18 @@ def test_internal_context_output_boundary():
 
     assert len(calls) == 4
 
+    # Selective prompt grounding intentionally omits the full
+    # verified-capability block on unrelated/general turns.
+    # The output sanitizer must still reject leaked/internal-looking
+    # blocks even when the model invents or echoes those markers.
     assert (
         "<verified_capability_truth>"
-        in calls[0]["system_prompt"]
+        not in calls[0]["system_prompt"]
+    )
+
+    print(
+        "GENERAL TURN CAPABILITY BLOCK OMITTED:",
+        True,
     )
 
     print(
@@ -8776,11 +8786,54 @@ def test_runtime_current_boundary():
     response = orchestrator.handle(prompt)
 
     assert response.status == "success"
-    assert response.message == "RUNTIME CURRENT RESPONSE"
-    assert calls == [prompt]
+
+    assert (
+        "I am Cauvis."
+        in response.message
+    )
+
+    assert (
+        "No configured, runtime-eligible AI model "
+        "provider is currently available."
+        in response.message
+    )
+
+    assert (
+        "did not call an AI model"
+        in response.message
+    )
+
+    assert response.data["provider"] is None
+    assert response.data["model"] is None
+
+    assert calls == []
+
+    telemetry = response.data[
+        "telemetry"
+    ]
+
+    assert telemetry[
+        "path"
+    ] == "deterministic_status"
+
+    assert telemetry[
+        "model_called"
+    ] is False
+
+    assert telemetry[
+        "deterministic_guard"
+    ] == "runtime_current"
 
     print("RUNTIME CURRENT KIND:", decision.kind.value)
     print("WEB RETRIEVAL REQUIRED:", decision.requires_retrieval)
+    print(
+        "RUNTIME RESPONSE GROUNDED:",
+        True,
+    )
+    print(
+        "RUNTIME MODEL CALLS:",
+        0,
+    )
 
     return True
 
@@ -8878,11 +8931,48 @@ def test_capability_status_vs_execution():
     )
 
     assert response.status == "success"
-    assert response.message == "CAPABILITY STATUS RESPONSE"
-    assert calls == [capability_prompts[0]]
+
+    assert (
+        "web browsing/actions is unavailable "
+        "(not_connected)"
+        in response.message
+    )
+
+    assert (
+        "computer/system control is unavailable "
+        "(not_connected)"
+        in response.message
+    )
+
+    assert (
+        "file access/actions is unavailable "
+        "(not_connected)"
+        in response.message
+    )
+
+    assert (
+        "reminders is unavailable "
+        "(not_connected)"
+        in response.message
+    )
+
+    assert calls == []
+
+    telemetry = response.data[
+        "telemetry"
+    ]
+
+    assert telemetry[
+        "model_called"
+    ] is False
+
+    assert telemetry[
+        "deterministic_guard"
+    ] == "capability_status"
 
     print("CAPABILITY QUESTIONS:", len(capability_prompts))
     print("DIRECT RETRIEVAL STILL ACTION:", direct.requested)
+    print("CAPABILITY MODEL CALLS:", 0)
 
     return True
 
@@ -9899,6 +9989,797 @@ def test_turn_latency_telemetry():
     return True
 
 
+
+# ============================================================
+# TEST 66 - SELECTIVE CAPABILITY PROMPT GROUNDING
+# ============================================================
+
+def test_selective_capability_prompt_grounding():
+    """
+    Verify the full verified-capability inventory is injected only
+    for turns that actually need runtime/capability grounding.
+
+    Deterministic guards and existing safety/identity/developer
+    instructions must remain unchanged.
+    """
+
+    from core.config import CauvisConfig
+    from core.orchestrator import (
+        CauvisOrchestrator,
+    )
+    from intelligence.models import (
+        ModelResponse,
+    )
+    from intelligence.router import (
+        AIModelRouter,
+    )
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                {
+                    "user_input": user_input,
+                    "system_prompt": (
+                        system_prompt or ""
+                    ),
+                }
+            )
+
+            return ModelResponse(
+                text="SELECTIVE GROUNDING OK",
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id=(
+            "selective-capability-grounding-test"
+        ),
+    )
+
+    compact_prompt = (
+        orchestrator._build_turn_system_prompt(
+            "",
+            "",
+            include_capability_context=False,
+        )
+    )
+
+    full_prompt = (
+        orchestrator._build_turn_system_prompt(
+            "",
+            "",
+            include_capability_context=True,
+        )
+    )
+
+    assert (
+        "<verified_capability_truth>"
+        not in compact_prompt
+    )
+
+    assert (
+        "<verified_capability_truth>"
+        in full_prompt
+    )
+
+    assert len(full_prompt) > len(compact_prompt)
+
+    default_prompt = (
+        orchestrator._build_turn_system_prompt(
+            "",
+            "",
+        )
+    )
+
+    assert (
+        "<verified_capability_truth>"
+        in default_prompt
+    )
+
+    general = orchestrator.handle(
+        "In one short sentence, what is photosynthesis?"
+    )
+
+    assert general.status == "success"
+
+    general_prompt = calls[-1][
+        "system_prompt"
+    ]
+
+    assert (
+        "<verified_capability_truth>"
+        not in general_prompt
+    )
+
+    assert (
+        general.data["metadata"][
+            "capability_grounding_included"
+        ]
+        is False
+    )
+
+    assert (
+        general.data["metadata"][
+            "turn_system_prompt_chars"
+        ]
+        == len(general_prompt)
+    )
+
+    assert (
+        orchestrator
+        ._should_include_verified_capability_context(
+            "What capabilities do you have available right now?"
+        )
+        is True
+    )
+
+    capability_prompt = (
+        orchestrator._build_turn_system_prompt(
+            "",
+            "",
+            include_capability_context=True,
+        )
+    )
+
+    assert (
+        "<verified_capability_truth>"
+        in capability_prompt
+    )
+
+    assert (
+        orchestrator
+        ._should_include_verified_capability_context(
+            "What AI model are you using right now?"
+        )
+        is True
+    )
+
+    runtime_prompt = (
+        orchestrator._build_turn_system_prompt(
+            "",
+            "",
+            include_capability_context=True,
+        )
+    )
+
+    assert (
+        "<verified_capability_truth>"
+        in runtime_prompt
+    )
+
+    memory = orchestrator.handle(
+        "Can you remember things from previous sessions?"
+    )
+
+    assert memory.status == "success"
+
+    memory_prompt = calls[-1][
+        "system_prompt"
+    ]
+
+    assert (
+        "<verified_capability_truth>"
+        in memory_prompt
+    )
+
+    developer = orchestrator.handle(
+        "Write code for a temporary internet capability "
+        "and show me the patch."
+    )
+
+    assert developer.status == "success"
+
+    developer_prompt = calls[-1][
+        "system_prompt"
+    ]
+
+    assert (
+        "treat that as content generation"
+        in developer_prompt
+    )
+
+    assert (
+        "not as an instruction to self-modify"
+        in developer_prompt
+    )
+
+    call_count_before_block = len(calls)
+
+    blocked = orchestrator.handle(
+        "Open Notepad."
+    )
+
+    assert blocked.status == "blocked"
+    assert len(calls) == call_count_before_block
+
+    history_turn = orchestrator.handle(
+        "What did I ask you first?"
+    )
+
+    assert history_turn.status == "success"
+
+    history_prompt = calls[-1][
+        "system_prompt"
+    ]
+
+    assert (
+        "<conversation_history>"
+        in history_prompt
+    )
+
+    assert (
+        "current-session short-term context only"
+        in history_prompt
+    )
+
+    assert (
+        "<verified_capability_truth>"
+        not in history_prompt
+    )
+
+    print(
+        "GENERAL TURN CAPABILITY BLOCK OMITTED:",
+        True,
+    )
+
+    print(
+        "CAPABILITY TURN GROUNDED:",
+        True,
+    )
+
+    print(
+        "RUNTIME TURN GROUNDED:",
+        True,
+    )
+
+    print(
+        "MEMORY CAPABILITY TURN GROUNDED:",
+        True,
+    )
+
+    print(
+        "DEVELOPER SAFEGUARDS PRESERVED:",
+        True,
+    )
+
+    print(
+        "DETERMINISTIC ACTION GUARD PRESERVED:",
+        True,
+    )
+
+    return True
+
+
+
+# ============================================================
+# TEST 67 - COMPACT PROMPT + RUNTIME RESPONSE TRUTH
+# ============================================================
+
+def test_compact_prompt_and_runtime_response_truth():
+    """
+    Verify prompt compaction preserves permanent safety contracts
+    and runtime-current model/provider wording is grounded from the
+    actual ModelResponse rather than model-generated speculation.
+    """
+
+    from core.config import CauvisConfig
+    from core.orchestrator import (
+        CauvisOrchestrator,
+    )
+    from intelligence.models import (
+        ModelResponse,
+    )
+    from intelligence.router import (
+        AIModelRouter,
+    )
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                {
+                    "user_input": user_input,
+                    "system_prompt": (
+                        system_prompt or ""
+                    ),
+                }
+            )
+
+            return ModelResponse(
+                text=(
+                    "I cannot provide the specific model name "
+                    "for the current runtime."
+                ),
+                model="fake-model",
+                provider="fake-provider",
+                success=True,
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="compact-prompt-runtime-truth-test",
+    )
+
+    # Base prompt should be materially smaller than the previous
+    # 2455-character baseline while preserving critical phrases.
+    assert len(orchestrator.system_prompt) < 1400
+
+    for required in (
+        "You are Cauvis.",
+        "Your identity is Cauvis",
+        "they did not create or develop Cauvis",
+        (
+            "attribute Cauvis only to the "
+            "Cauvis project and its developer"
+        ),
+        (
+            "Do not claim that you are Microsoft, "
+            "OpenAI, Ollama, Phi-4-mini"
+        ),
+        "treat that as content generation",
+        "not as an instruction to self-modify",
+        "never claim that code was written to disk",
+        "Do not claim memory unless",
+        (
+            "Do not claim that Cauvis will remember "
+            "information across restarts or future sessions"
+        ),
+        (
+            "Do not invent Cauvis-specific tools, "
+            "source components, capabilities, memories, "
+            "or actions."
+        ),
+        (
+            "unless the Cauvis execution system actually "
+            "performed or accepted that operation."
+        ),
+    ):
+        assert required in orchestrator.system_prompt
+
+    capability_context = (
+        orchestrator._build_verified_capability_context()
+    )
+
+    assert (
+        "description=Bounded current-session "
+        "conversation continuity. This is not "
+        "persistent long-term memory."
+        in capability_context
+    )
+
+    assert (
+        "name=web_actions; "
+        "status=not_connected; "
+        "available=false"
+        in capability_context
+    )
+
+    # Compact context should not repeat verbose descriptions for
+    # every unavailable action capability.
+    assert (
+        "description=Live web/browser actions."
+        not in capability_context
+    )
+
+    runtime_model_response = ModelResponse(
+        text=(
+            "I cannot provide the specific model name "
+            "for the current runtime."
+        ),
+        model="fake-model",
+        provider="fake-provider",
+        success=True,
+    )
+
+    runtime_text = (
+        orchestrator._apply_runtime_current_truth(
+            (
+                "Who are you, who created you, and what AI model "
+                "are you using right now?"
+            ),
+            runtime_model_response.text,
+            runtime_model_response,
+        )
+    )
+
+    assert runtime_text == (
+        "I am Cauvis. "
+        "Cauvis was developed as part of the Cauvis project "
+        "by its project developer. "
+        "This response is using the AI model fake-model "
+        "through the provider fake-provider."
+    )
+
+    assert (
+        "cannot provide"
+        not in runtime_text.lower()
+    )
+
+    print(
+        "COMPACT BASE PROMPT CHARS:",
+        len(orchestrator.system_prompt),
+    )
+
+    print(
+        "COMPACT CAPABILITY CONTEXT CHARS:",
+        len(capability_context),
+    )
+
+    print(
+        "RUNTIME MODEL/PROVIDER GROUNDED:",
+        True,
+    )
+
+    print(
+        "PERMANENT SAFETY PHRASES PRESERVED:",
+        True,
+    )
+
+    return True
+
+
+# ============================================================
+# TEST 68 - OLLAMA KEEP-ALIVE CONFIGURATION
+# ============================================================
+
+def test_ollama_keep_alive_configuration():
+    # Verify Cauvis can keep the local Ollama model resident longer
+    # than Ollama's short default idle window.
+
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.models import ModelRequest
+    from intelligence.providers.ollama import OllamaProvider
+
+    captured = []
+
+    def transport(url, headers, payload, timeout):
+        captured.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "payload": dict(payload),
+                "timeout": timeout,
+            }
+        )
+
+        return (
+            200,
+            {
+                "model": "keepalive-model",
+                "message": {
+                    "role": "assistant",
+                    "content": "KEEP ALIVE OK",
+                },
+                "done": True,
+                "done_reason": "stop",
+                "total_duration": 100,
+                "load_duration": 10,
+                "prompt_eval_count": 5,
+                "prompt_eval_cached_count": 4,
+                "eval_count": 3,
+                "eval_duration": 50,
+            },
+        )
+
+    provider = OllamaProvider(
+        model="keepalive-model",
+        transport=transport,
+        keep_alive="45m",
+    )
+
+    response = provider.generate(
+        ModelRequest(prompt="keep alive test")
+    )
+
+    assert response.success is True
+    assert len(captured) == 1
+
+    payload = captured[0]["payload"]
+
+    assert payload["keep_alive"] == "45m"
+    assert provider.keep_alive == "45m"
+
+    no_override_calls = []
+
+    def no_override_transport(
+        url,
+        headers,
+        payload,
+        timeout,
+    ):
+        no_override_calls.append(dict(payload))
+
+        return (
+            200,
+            {
+                "model": "default-model",
+                "message": {
+                    "role": "assistant",
+                    "content": "DEFAULT OK",
+                },
+                "done": True,
+            },
+        )
+
+    default_provider = OllamaProvider(
+        model="default-model",
+        transport=no_override_transport,
+    )
+
+    default_response = default_provider.generate(
+        ModelRequest(prompt="default test")
+    )
+
+    assert default_response.success is True
+    assert "keep_alive" not in no_override_calls[0]
+
+    default_orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        environment={},
+        session_id="keep-alive-default-test",
+    )
+
+    runtime_ollama = (
+        default_orchestrator.router.get_provider(
+            "ollama"
+        )
+    )
+
+    assert runtime_ollama is not None
+    assert runtime_ollama.keep_alive == "30m"
+
+    custom_orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        environment={
+            "CAUVIS_OLLAMA_KEEP_ALIVE": "2h",
+        },
+        session_id="keep-alive-custom-test",
+    )
+
+    custom_ollama = (
+        custom_orchestrator.router.get_provider(
+            "ollama"
+        )
+    )
+
+    assert custom_ollama is not None
+    assert custom_ollama.keep_alive == "2h"
+
+    print(
+        "REQUEST KEEP ALIVE:",
+        payload["keep_alive"],
+    )
+    print(
+        "CAUVIS DEFAULT KEEP ALIVE:",
+        runtime_ollama.keep_alive,
+    )
+    print(
+        "ENVIRONMENT OVERRIDE:",
+        custom_ollama.keep_alive,
+    )
+    print(
+        "SERVER DEFAULT STILL AVAILABLE:",
+        "keep_alive" not in no_override_calls[0],
+    )
+
+    return True
+
+
+
+# ============================================================
+# TEST 69 - DETERMINISTIC RUNTIME / CAPABILITY STATUS
+# ============================================================
+
+def test_deterministic_runtime_capability_status():
+    """
+    Verify runtime-current and capability-status questions are
+    answered from authoritative Cauvis runtime state without an
+    LLM call, while ordinary questions still use the model path.
+    """
+
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.models import ModelResponse
+    from intelligence.router import (
+        AIModelRouter,
+        ModelProvider,
+    )
+
+    class StatusProvider(ModelProvider):
+        name = "status-provider"
+        model = "status-model"
+        credential_required = False
+        provider_types = {
+            "local",
+        }
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+            self.router.register_provider(
+                StatusProvider()
+            )
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(user_input)
+
+            return ModelResponse(
+                text="GENERAL MODEL RESPONSE",
+                model="status-model",
+                provider="status-provider",
+                success=True,
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="deterministic-status-test",
+    )
+
+    runtime = orchestrator.handle(
+        (
+            "Who are you, who created you, and what AI model "
+            "are you using right now?"
+        )
+    )
+
+    assert runtime.status == "success"
+
+    assert runtime.message == (
+        "I am Cauvis. "
+        "Cauvis was developed as part of the Cauvis project "
+        "by its project developer. "
+        "Cauvis's current eligible AI provider is "
+        "status-provider, using model status-model. "
+        "This runtime-status response did not call that AI model."
+    )
+
+    assert calls == []
+
+    assert (
+        runtime.data["provider"]
+        == "status-provider"
+    )
+
+    assert (
+        runtime.data["model"]
+        == "status-model"
+    )
+
+    assert (
+        runtime.data["telemetry"][
+            "model_called"
+        ]
+        is False
+    )
+
+    capability = orchestrator.handle(
+        (
+            "Can you browse the web, control my computer, "
+            "access my files, and set reminders right now?"
+        )
+    )
+
+    assert capability.status == "success"
+    assert calls == []
+
+    assert (
+        "web browsing/actions is unavailable "
+        "(not_connected)"
+        in capability.message
+    )
+
+    assert (
+        "computer/system control is unavailable "
+        "(not_connected)"
+        in capability.message
+    )
+
+    assert (
+        "file access/actions is unavailable "
+        "(not_connected)"
+        in capability.message
+    )
+
+    assert (
+        "reminders is unavailable "
+        "(not_connected)"
+        in capability.message
+    )
+
+    assert (
+        capability.data["telemetry"][
+            "model_called"
+        ]
+        is False
+    )
+
+    # Both deterministic replies remain normal session turns.
+    assert (
+        orchestrator.conversation.turn_count(
+            "deterministic-status-test"
+        )
+        == 4
+    )
+
+    general = orchestrator.handle(
+        "In one short sentence, what is photosynthesis?"
+    )
+
+    assert general.status == "success"
+    assert general.message == "GENERAL MODEL RESPONSE"
+
+    assert calls == [
+        "In one short sentence, what is photosynthesis?"
+    ]
+
+    assert (
+        general.data["telemetry"][
+            "model_called"
+        ]
+        is True
+    )
+
+    print(
+        "RUNTIME STATUS MODEL CALLS:",
+        0,
+    )
+
+    print(
+        "CAPABILITY STATUS MODEL CALLS:",
+        0,
+    )
+
+    print(
+        "GENERAL MODEL PATH PRESERVED:",
+        True,
+    )
+
+    print(
+        "STATUS TURNS STORED IN SESSION:",
+        True,
+    )
+
+    return True
+
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -10081,6 +10962,22 @@ tests = [
     (
         "Turn Latency Telemetry",
         test_turn_latency_telemetry,
+    ),
+    (
+        "Selective Capability Prompt Grounding",
+        test_selective_capability_prompt_grounding,
+    ),
+    (
+        "Compact Prompt + Runtime Response Truth",
+        test_compact_prompt_and_runtime_response_truth,
+    ),
+    (
+        "Ollama Keep-Alive Configuration",
+        test_ollama_keep_alive_configuration,
+    ),
+    (
+        "Deterministic Runtime / Capability Status",
+        test_deterministic_runtime_capability_status,
     ),
 ]
 

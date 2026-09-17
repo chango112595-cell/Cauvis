@@ -2,7 +2,7 @@
 
 **Purpose:** This file is the source of truth for continuing the Cauvis build across ChatGPT conversations. A new AI chat should read this file before making changes.
 
-**Last updated:** 2026-09-10
+**Last updated:** 2026-09-15
 **Current project path:** `C:\Users\Admin\Cauvis`
 **Current shell:** PowerShell, inside `(.venv)` at `C:\Users\Admin\Cauvis`
 **Python:** 3.11.9
@@ -7266,3 +7266,359 @@ stage.
 ---
 
 # END OF SOURCE-OF-TRUTH FILE
+---
+
+# 2026-09-15 CHECKPOINT — ROUND 2 PERFORMANCE / RUNTIME TRUTH MILESTONE
+
+## Status
+
+**Round 2 performance optimization Fixes 6B through 6E: COMPLETE AND VALIDATED.**
+
+Current permanent validation baseline:
+
+```text
+PASSED:  69
+FAILED:  0
+TOTAL:   69
+STATUS: ALL TESTS PASSED
+```
+
+Latest measured validation runtime:
+
+```text
+ELAPSED: 2.18 seconds
+```
+
+Do not reduce the test count below 69 without deliberately removing or replacing a permanent regression test.
+
+## Fix 6B — Selective Capability Prompt Grounding
+
+Problem discovered:
+
+- Cauvis was injecting the complete verified-capability inventory into every model turn.
+- A trivial general question therefore paid the prompt cost of runtime capability truth even when the question had nothing to do with Cauvis capabilities.
+
+Implemented:
+
+- `core/orchestrator.py`
+- General unrelated turns omit `<verified_capability_truth>`.
+- Runtime-current, capability-status, persistent-memory-capability, and relevant status turns can still request authoritative capability grounding.
+- Deterministic external-action and factual-freshness guards remain before the model.
+- Added response metadata:
+  - `turn_system_prompt_chars`
+  - `capability_grounding_included`
+- Added permanent Test 66:
+  - `Selective Capability Prompt Grounding`
+
+Important regression alignment:
+
+- Test 57 was updated so its real security purpose remains internal-context leak prevention; it no longer incorrectly requires a capability block on every general turn.
+
+## Fix 6C — Compact Prompt + Runtime Response Truth
+
+Implemented:
+
+- Permanent Cauvis base system contract compressed substantially while preserving:
+  - Cauvis identity
+  - Cauvis project/developer attribution
+  - underlying-model/vendor separation
+  - developer-review content-generation boundary
+  - no false file-write/apply/run claims
+  - session-memory provenance rules
+  - no invented Cauvis capabilities/actions
+  - no false external-operation claims
+- Verified-capability rendering compressed while preserving authoritative:
+  - capability name
+  - status
+  - `available=true/false`
+  - provider/model metadata
+- Repeated conversation-history provenance instructions compressed.
+- Runtime-current model/provider fallback post-processing is grounded from the actual `ModelResponse` instead of generated speculation.
+- Added permanent Test 67:
+  - `Compact Prompt + Runtime Response Truth`
+
+Validated prompt sizes during Test 67:
+
+```text
+COMPACT BASE PROMPT CHARS: 1171
+COMPACT CAPABILITY CONTEXT CHARS: 946
+```
+
+Important regression alignment:
+
+- Test 58 was updated so runtime-current truth may be deterministically corrected instead of requiring unchanged fake-model prose.
+
+## Fix 6D — Ollama Keep-Alive
+
+Native Ollama diagnostics proved a major cold-load penalty.
+
+Measured example:
+
+```text
+GENERAL_1
+Ollama total:          ~18.38 s
+load_duration:          ~9.38 s
+prompt_eval_count:      248
+prompt cached:          0
+generation:             ~11.53 tok/s
+
+GENERAL_2
+Ollama total:           ~2.47 s
+load_duration:          ~1.6 ms
+prompt_eval_count:      248
+prompt cached:          247
+generation:             ~11.44 tok/s
+```
+
+Conclusion:
+
+- The local model is usable when resident and its prompt prefix is cached.
+- A large part of the first-turn delay was Ollama loading the model.
+- Prompt caching is highly effective for repeated prompt prefixes.
+
+Implemented in `intelligence/providers/ollama.py` and `core/orchestrator.py`:
+
+- Ollama `/api/chat` payload can include `keep_alive`.
+- Cauvis runtime default:
+  - `30m`
+- Environment override:
+  - `CAUVIS_OLLAMA_KEEP_ALIVE`
+- Provider-level `None` still allows the Ollama server default.
+- Added permanent Test 68:
+  - `Ollama Keep-Alive Configuration`
+
+## Fix 6E — Deterministic Runtime / Capability Status
+
+Problem:
+
+Cauvis was spending roughly 10–12 seconds asking Phi-4-mini to describe authoritative runtime state that Cauvis already had locally.
+
+Implemented in `core/orchestrator.py`:
+
+### Runtime-current status
+
+Questions such as:
+
+```text
+What AI model are you using right now?
+Who are you, who created you, and what AI model are you using right now?
+```
+
+now use deterministic Cauvis runtime/router truth.
+
+The status path selects the best configured, runtime-eligible AI provider without generating model text.
+
+Telemetry:
+
+```text
+path=deterministic_status
+model_called=False
+deterministic_guard=runtime_current
+```
+
+The response still enters normal current-session conversation history.
+
+### Capability status
+
+Questions such as:
+
+```text
+Can you browse the web right now?
+Can you control my computer?
+Can you access my files?
+Can you set reminders?
+What capabilities do you have available right now?
+```
+
+now use `VerifiedCapabilitySnapshot` directly.
+
+No LLM is required merely to restate capability truth.
+
+Telemetry:
+
+```text
+path=deterministic_status
+model_called=False
+deterministic_guard=capability_status
+```
+
+The response still enters current-session conversation history.
+
+General knowledge/model-generation turns are unchanged and still use the normal CauvisBrain/provider path.
+
+Existing permanent Tests 45, 58, 59, 66, and 67 were aligned with the new architecture, and permanent Test 69 was added:
+
+- `Deterministic Runtime / Capability Status`
+
+## Final Live Benchmark After Fix 6E
+
+Measured with `live_fix6e_final_benchmark.py`:
+
+```text
+GENERAL - FIRST TURN
+total_turn_ms: 12429.498
+path: model_success
+model_called: True
+provider: ollama
+model: phi4-mini
+
+GENERAL - SECOND TURN
+total_turn_ms: 6792.044
+path: model_success
+model_called: True
+provider: ollama
+model: phi4-mini
+
+RUNTIME CURRENT - DETERMINISTIC
+total_turn_ms: 0.189
+path: deterministic_status
+model_called: False
+deterministic_guard: runtime_current
+provider: ollama
+model: phi4-mini
+
+CAPABILITY STATUS - DETERMINISTIC
+total_turn_ms: 0.181
+path: deterministic_status
+model_called: False
+deterministic_guard: capability_status
+provider: None
+model: None
+```
+
+Important interpretation:
+
+- Runtime-current and capability-status latency improved from roughly 10–12 seconds to sub-millisecond local deterministic handling in this measurement.
+- General model turns remain hardware/model dependent.
+- The two general benchmark turns are not a pure identical cold-vs-warm comparison because the second turn includes prior session conversation history.
+- Earlier clean-session native diagnostics showed a warmed, highly cached identical general prompt at about 3 seconds end-to-end.
+- Phi-4-mini output generation remains around 10–12 tokens/second on the current machine.
+- Do not claim that prompt size alone controls latency. Model residency, prompt-cache reuse, output length, and conversation growth materially affect it.
+
+## Current Performance Architecture
+
+```text
+Direct external action
+    -> deterministic action guard
+    -> no model unless/until a real execution bridge exists
+
+Current/live external fact requiring retrieval
+    -> deterministic freshness/retrieval guard
+    -> fail closed until retrieval/evidence bridge exists
+
+Runtime-current Cauvis status
+    -> deterministic runtime/router truth
+    -> no LLM call
+
+Capability-status question
+    -> VerifiedCapabilitySnapshot
+    -> no LLM call
+
+Ordinary general/model question
+    -> compact Cauvis prompt
+    -> selective context
+    -> CauvisBrain
+    -> provider router
+    -> Ollama/OpenAI according to policy/runtime
+```
+
+## Performance Work That Is Complete
+
+- per-turn latency telemetry
+- selective capability grounding
+- compact base prompt
+- compact capability rendering
+- runtime model/provider truth correction
+- Ollama keep-alive support
+- deterministic runtime-current responses
+- deterministic capability-status responses
+
+Performance remains an ongoing concern, but the Round 2 blocking latency investigation is complete enough to move forward.
+
+## Performance Work To Revisit Later
+
+Do not optimize these blindly. Measure first.
+
+Potential later work:
+
+- conversation-history prompt budgeting / summarization
+- streaming for perceived latency
+- model selection/routing by task class
+- hardware acceleration verification
+- provider-specific output-token limits
+- prewarming/startup behavior
+- exposing `prompt_eval_duration` directly in Ollama metadata if the installed API returns it
+- deeper prompt-cache-aware routing
+
+Current `ConversationRuntime` defaults remain:
+
+```text
+max_turns=20
+max_context_characters=12000
+```
+
+These have not yet been reduced.
+
+## Round 2 Remaining Work
+
+After this checkpoint, return to the remaining robustness roadmap:
+
+1. broader multi-question handling
+2. broader language handling
+3. uncertainty / factual nuance
+4. real retrieval execution + evidence bridge
+
+The highest-value functional milestone after robustness is still the real retrieval/evidence bridge, because current/live external factual requests intentionally fail closed until real evidence can be retrieved and transported.
+
+## Voice Roadmap Still Unchanged
+
+Beta 1.3:
+
+- microphone
+- VAD
+- offline STT
+- speaker output
+- offline TTS
+- natural turn handling
+
+Beta 1.4:
+
+- wake word
+- interruption
+- background mode
+
+Voice remains I/O around the same central Cauvis brain. Do not create a second voice brain.
+
+## Temporary Local Files
+
+The following diagnostics/patch helpers are development artifacts and should **not** be committed unless deliberately chosen:
+
+```text
+live_latency_probe.py
+live_ollama_performance_diagnostic.py
+live_prompt_footprint_diagnostic.py
+live_fix6b_performance_check.py
+live_fix6c_native_ollama_diagnostic.py
+live_fix6e_final_benchmark.py
+
+patch_cauvis_round2_fix6b_selective_grounding.py
+fix_cauvis_round2_fix6b_test57_alignment.py
+patch_cauvis_round2_fix6c_compact_prompt_runtime_truth.py
+fix_cauvis_round2_fix6c_test58_alignment.py
+patch_cauvis_round2_fix6d_ollama_keep_alive.py
+patch_cauvis_round2_fix6e_deterministic_status.py
+```
+
+Backup files created by patch scripts should also remain uncommitted.
+
+## Exact Resume Point
+
+At this checkpoint:
+
+- Fixes 6B, 6C, 6D, and 6E are applied locally.
+- Permanent validation is 69/69.
+- Final live benchmark succeeded.
+- Project-state update should be committed with the production/test changes.
+- Inspect Git status and diff carefully before committing.
+- Exclude temporary diagnostic scripts, patch helpers, and backup files.
+- After a clean commit/push, continue with Round 2 Fix 7: broader multi-question handling.

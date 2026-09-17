@@ -58,6 +58,7 @@ class OllamaProvider(ModelProvider):
         base_url: str | None = None,
         transport: Transport | None = None,
         timeout_seconds: float = 120.0,
+        keep_alive: str | int | float | None = None,
     ):
         model = str(model).strip()
 
@@ -99,6 +100,33 @@ class OllamaProvider(ModelProvider):
         self.timeout_seconds = float(
             timeout_seconds
         )
+
+        if isinstance(
+            keep_alive,
+            bool,
+        ):
+            raise ValueError(
+                "Ollama keep_alive must be a duration string, "
+                "number, or None."
+            )
+
+        if isinstance(
+            keep_alive,
+            str,
+        ):
+            keep_alive = keep_alive.strip()
+
+            if not keep_alive:
+                keep_alive = None
+
+        elif keep_alive is not None:
+            keep_alive = (
+                float(keep_alive)
+                if isinstance(keep_alive, float)
+                else int(keep_alive)
+            )
+
+        self.keep_alive = keep_alive
 
     def generate(
         self,
@@ -166,6 +194,11 @@ class OllamaProvider(ModelProvider):
             "stream": False,
             "options": options,
         }
+
+        if self.keep_alive is not None:
+            payload["keep_alive"] = (
+                self.keep_alive
+            )
 
         headers = {
             "Content-Type": "application/json",
