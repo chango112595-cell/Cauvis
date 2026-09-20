@@ -10780,6 +10780,209 @@ def test_deterministic_runtime_capability_status():
     return True
 
 
+
+# ============================================================
+# TEST 70 - BROADER MULTI-QUESTION HANDLING
+# ============================================================
+
+def test_broader_multi_question_handling():
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from core.request_segments import RequestSegmenter
+    from intelligence.models import ModelResponse
+    from intelligence.router import AIModelRouter, ModelProvider
+
+    segmenter = RequestSegmenter()
+
+    segmented = segmenter.split(
+        "What is photosynthesis, and how does chlorophyll help?"
+    )
+
+    assert [item.text for item in segmented] == [
+        "What is photosynthesis",
+        "how does chlorophyll help?",
+    ]
+
+    ordinary = segmenter.split(
+        "Why do plants use water and carbon dioxide?"
+    )
+    assert len(ordinary) == 1
+
+    runtime_parts = segmenter.split(
+        (
+            "Who are you, who created you, and what AI model "
+            "are you using right now?"
+        )
+    )
+
+    assert [item.text for item in runtime_parts] == [
+        "Who are you",
+        "who created you",
+        "what AI model are you using right now?",
+    ]
+
+    class MultiProvider(ModelProvider):
+        name = "multi-provider"
+        model = "multi-model"
+        credential_required = False
+        provider_types = {"local"}
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+            self.router.register_provider(MultiProvider())
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                {
+                    "user_input": user_input,
+                    "system_prompt": system_prompt or "",
+                }
+            )
+            return ModelResponse(
+                text="MODEL ANSWER",
+                model="multi-model",
+                provider="multi-provider",
+                success=True,
+            )
+
+    freshness = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="multi-freshness-test",
+    )
+
+    fresh_response = freshness.handle(
+        "Explain photosynthesis, and who is the current president?"
+    )
+
+    assert fresh_response.status == "blocked"
+    assert fresh_response.data["blocked_segment"] == (
+        "who is the current president?"
+    )
+    assert fresh_response.data["request_segment_count"] == 2
+    assert calls == []
+
+    action = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="multi-action-test",
+    )
+
+    action_response = action.handle(
+        "Explain photosynthesis, and open Notepad."
+    )
+
+    assert action_response.status == "blocked"
+    assert action_response.data["blocked_segment"] == "open Notepad."
+    assert action_response.data["request_segment_count"] == 2
+    assert calls == []
+
+    mixed = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="multi-status-general-test",
+    )
+
+    mixed_response = mixed.handle(
+        (
+            "What AI model are you using right now, "
+            "and explain photosynthesis."
+        )
+    )
+
+    assert mixed_response.status == "success"
+    assert len(calls) == 1
+    assert calls[0]["user_input"] == "explain photosynthesis."
+    assert "multi-provider" in mixed_response.message
+    assert "multi-model" in mixed_response.message
+    assert "MODEL ANSWER" in mixed_response.message
+    assert mixed_response.data["metadata"]["request_segment_count"] == 2
+    assert mixed_response.data["metadata"][
+        "deterministic_status_segment_count"
+    ] == 1
+    assert mixed_response.data["metadata"]["model_routed_segment_count"] == 1
+
+    before_status_calls = len(calls)
+
+    status_only = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="multi-status-only-test",
+    )
+
+    status_response = status_only.handle(
+        (
+            "Who are you, who created you, and what AI model "
+            "are you using right now?"
+        )
+    )
+
+    assert status_response.status == "success"
+    assert len(calls) == before_status_calls
+    assert "I am Cauvis." in status_response.message
+    assert "Cauvis was developed as part of the Cauvis project" in (
+        status_response.message
+    )
+    assert "multi-provider" in status_response.message
+    assert status_response.data["telemetry"]["model_called"] is False
+
+    general = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="multi-general-test",
+    )
+
+    general_prompt = (
+        "What is photosynthesis, and how does chlorophyll help?"
+    )
+
+    general_response = general.handle(general_prompt)
+
+    assert general_response.status == "success"
+    assert len(calls) == before_status_calls + 1
+    assert calls[-1]["user_input"] == general_prompt
+    assert "Answer every part explicitly." in calls[-1]["system_prompt"]
+    assert general_response.data["metadata"]["request_segment_count"] == 2
+
+    # Standalone identity remains on the existing model path.
+    identity = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="multi-identity-compat-test",
+    )
+
+    identity_response = identity.handle(
+        "Who created you?"
+    )
+
+    assert identity_response.status == "success"
+    assert calls[-1]["user_input"] == "Who created you?"
+    assert identity_response.data["telemetry"]["model_called"] is True
+
+    print("SEGMENTER MULTI-PART:", True)
+    print("MIXED FRESHNESS FAIL-CLOSED:", True)
+    print("MIXED ACTION FAIL-CLOSED:", True)
+    print("STATUS + GENERAL ROUTED:", True)
+    print("ALL-STATUS DETERMINISTIC:", True)
+    print("MULTI-GENERAL ANSWER-ALL:", True)
+    print("STANDALONE IDENTITY COMPATIBLE:", True)
+
+    return True
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -10978,6 +11181,10 @@ tests = [
     (
         "Deterministic Runtime / Capability Status",
         test_deterministic_runtime_capability_status,
+    ),
+    (
+        "Broader Multi-Question Handling",
+        test_broader_multi_question_handling,
     ),
 ]
 

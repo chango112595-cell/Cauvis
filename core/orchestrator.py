@@ -11,6 +11,7 @@ from core.state import CauvisState
 from core.intent import IntentDetector
 from core.response import CauvisResponse
 from core.action_request import ActionRequestDetector
+from core.request_segments import RequestSegmenter
 
 from intelligence.brain import CauvisBrain
 from intelligence.factual_boundary import (
@@ -45,6 +46,7 @@ class CauvisOrchestrator:
         self.state = CauvisState()
         self.intent_detector = IntentDetector()
         self.action_request_detector = ActionRequestDetector()
+        self.request_segmenter = RequestSegmenter()
         self.factual_boundary_classifier = (
             FactualBoundaryClassifier()
         )
@@ -119,10 +121,136 @@ class CauvisOrchestrator:
         )
 
 
+    @staticmethod
+    def _is_runtime_identity_segment(
+        text: str,
+    ) -> bool:
+        normalized = " ".join(
+            str(text).lower().strip().split()
+        ).rstrip(" ?.!,;:")
+
+        return normalized in {
+            "who are you",
+            "what are you",
+            "who created you",
+            "who built you",
+            "who developed you",
+            "who created or developed you",
+        }
+
+    def _analyze_request_segments(
+        self,
+        user_input: str,
+    ) -> tuple[dict[str, object], ...]:
+        segments = self.request_segmenter.split(user_input)
+
+        analyses = []
+
+        for segment in segments:
+            factual = self.factual_boundary_classifier.classify(
+                segment.text
+            )
+
+            action = self.action_request_detector.detect(
+                segment.text
+            )
+
+            status_kind = None
+
+            if factual.kind.value in {
+                "runtime_current",
+                "capability_status",
+            }:
+                status_kind = factual.kind.value
+
+            analyses.append(
+                {
+                    "index": segment.index,
+                    "text": segment.text,
+                    "factual": factual,
+                    "action": action,
+                    "status_kind": status_kind,
+                }
+            )
+
+        # Preserve the existing model-path identity behavior for a
+        # standalone identity question. Identity clauses become
+        # deterministic only when the same user turn also contains
+        # a real runtime-current model/provider question.
+        has_runtime_current = any(
+            item.get("status_kind") == "runtime_current"
+            for item in analyses
+        )
+
+        if has_runtime_current:
+            for item in analyses:
+                if (
+                    item.get("status_kind") is None
+                    and self._is_runtime_identity_segment(
+                        str(item.get("text", ""))
+                    )
+                ):
+                    item["status_kind"] = "runtime_identity"
+
+        return tuple(analyses)
+
+    @staticmethod
+    def _request_segment_texts(analyses) -> list[str]:
+        return [str(item["text"]) for item in analyses]
+
+    @staticmethod
+    def _status_segment_analyses(analyses):
+        return tuple(
+            item
+            for item in analyses
+            if item.get("status_kind") is not None
+        )
+
+    def _build_deterministic_status_bundle(
+        self,
+        status_analyses,
+    ) -> tuple[str, str | None, str | None]:
+        messages = []
+        provider_name = None
+        model_name = None
+
+        for item in status_analyses:
+            kind = item.get("status_kind")
+            text = str(item.get("text", ""))
+
+            if kind in {
+                "runtime_current",
+                "runtime_identity",
+            }:
+                message, provider, model = (
+                    self._build_runtime_current_status_message(text)
+                )
+
+                if provider_name is None:
+                    provider_name = provider
+                if model_name is None:
+                    model_name = model
+
+            elif kind == "capability_status":
+                message = self._build_capability_status_message(text)
+
+            else:
+                continue
+
+            if message and message not in messages:
+                messages.append(message)
+
+        return (
+            " ".join(messages).strip(),
+            provider_name,
+            model_name,
+        )
+
     def _guard_external_action_request(
         self,
         user_input: str,
         intent,
+        request_analyses=None,
     ) -> CauvisResponse | None:
         """
         Fail closed for direct external-action requests.
@@ -138,14 +266,21 @@ class CauvisOrchestrator:
         Informational/instructional requests continue normally.
         """
 
-        action_request = (
-            self.action_request_detector.detect(
-                user_input
-            )
+        analyses = (
+            request_analyses
+            if request_analyses is not None
+            else self._analyze_request_segments(user_input)
         )
 
-        if not action_request.requested:
+        action_entry = next(
+            (item for item in analyses if item["action"].requested),
+            None,
+        )
+
+        if action_entry is None:
             return None
+
+        action_request = action_entry["action"]
 
         snapshot = (
             self.verified_capability_builder.build(
@@ -237,6 +372,9 @@ class CauvisOrchestrator:
                 "action_performed": False,
                 "model_called": False,
                 "block_reason": block_reason,
+                "request_segment_count": len(analyses),
+                "request_segments": self._request_segment_texts(analyses),
+                "blocked_segment": str(action_entry["text"]),
             },
         )
 
@@ -244,6 +382,7 @@ class CauvisOrchestrator:
         self,
         user_input: str,
         intent,
+        request_analyses=None,
     ) -> CauvisResponse | None:
         """
         Fail closed when a request requires fresh/current evidence
@@ -256,14 +395,25 @@ class CauvisOrchestrator:
         This boundary is separate from TaskAnalyzer routing hints.
         """
 
-        decision = (
-            self.factual_boundary_classifier.classify(
-                user_input
-            )
+        analyses = (
+            request_analyses
+            if request_analyses is not None
+            else self._analyze_request_segments(user_input)
         )
 
-        if not decision.requires_fresh_evidence:
+        freshness_entry = next(
+            (
+                item
+                for item in analyses
+                if item["factual"].requires_fresh_evidence
+            ),
+            None,
+        )
+
+        if freshness_entry is None:
             return None
+
+        decision = freshness_entry["factual"]
 
         snapshot = (
             self.verified_capability_builder.build(
@@ -355,6 +505,9 @@ class CauvisOrchestrator:
                 "fresh_evidence_available": False,
                 "model_called": False,
                 "block_reason": block_reason,
+                "request_segment_count": len(analyses),
+                "request_segments": self._request_segment_texts(analyses),
+                "blocked_segment": str(freshness_entry["text"]),
             },
         )
 
@@ -756,46 +909,63 @@ class CauvisOrchestrator:
         *,
         turn_started: float,
         guard_ms: float,
+        request_analyses=None,
     ) -> CauvisResponse | None:
         """
         Answer runtime-current and capability-status questions from
         authoritative Cauvis runtime state without calling an LLM.
         """
 
-        decision = (
-            self.factual_boundary_classifier.classify(
-                user_input
-            )
+        analyses = (
+            request_analyses
+            if request_analyses is not None
+            else self._analyze_request_segments(user_input)
         )
 
-        kind = decision.kind.value
+        status_analyses = self._status_segment_analyses(
+            analyses
+        )
 
-        if kind not in {
-            "runtime_current",
-            "capability_status",
-        }:
+        if (
+            not status_analyses
+            or len(status_analyses) != len(analyses)
+        ):
             return None
 
         status_started = time.perf_counter()
 
-        provider_name = None
-        model_name = None
+        (
+            message,
+            provider_name,
+            model_name,
+        ) = self._build_deterministic_status_bundle(
+            status_analyses
+        )
 
-        if kind == "runtime_current":
-            (
-                message,
-                provider_name,
-                model_name,
-            ) = self._build_runtime_current_status_message(
-                user_input
-            )
+        status_kinds = tuple(
+            str(item["status_kind"])
+            for item in status_analyses
+        )
+
+        unique_status_kinds = set(
+            status_kinds
+        )
+
+        if unique_status_kinds.issubset(
+            {
+                "runtime_identity",
+                "runtime_current",
+            }
+        ):
+            kind = "runtime_current"
+
+        elif unique_status_kinds == {
+            "capability_status",
+        }:
+            kind = "capability_status"
 
         else:
-            message = (
-                self._build_capability_status_message(
-                    user_input
-                )
-            )
+            kind = "multi_status"
 
         self.conversation.append(
             self.session_id,
@@ -844,6 +1014,9 @@ class CauvisOrchestrator:
                 "metadata": {
                     "deterministic_runtime_truth": True,
                     "factual_boundary_kind": kind,
+                    "request_segment_count": len(analyses),
+                    "deterministic_status_segment_count": len(status_analyses),
+                    "request_segments": self._request_segment_texts(analyses),
                 },
                 "evidence": [],
                 "telemetry": telemetry,
@@ -1705,10 +1878,15 @@ class CauvisOrchestrator:
 
         guard_started = time.perf_counter()
 
+        request_analyses = self._analyze_request_segments(
+            user_input
+        )
+
         action_guard_response = (
             self._guard_external_action_request(
                 user_input,
                 intent,
+                request_analyses=request_analyses,
             )
         )
 
@@ -1742,6 +1920,7 @@ class CauvisOrchestrator:
             self._guard_factual_freshness_request(
                 user_input,
                 intent,
+                request_analyses=request_analyses,
             )
         )
 
@@ -1781,11 +1960,45 @@ class CauvisOrchestrator:
                 intent,
                 turn_started=turn_started,
                 guard_ms=guard_ms,
+                request_analyses=request_analyses,
             )
         )
 
         if deterministic_status_response is not None:
             return deterministic_status_response
+
+        # -----------------------------------------------------
+        # Mixed multi-request routing
+        # -----------------------------------------------------
+
+        status_analyses = self._status_segment_analyses(
+            request_analyses
+        )
+
+        model_analyses = tuple(
+            item
+            for item in request_analyses
+            if item.get("status_kind") is None
+        )
+
+        deterministic_status_text = ""
+
+        if status_analyses:
+            (
+                deterministic_status_text,
+                _,
+                _,
+            ) = self._build_deterministic_status_bundle(
+                status_analyses
+            )
+
+        if status_analyses and model_analyses:
+            model_input = "\n".join(
+                str(item["text"])
+                for item in model_analyses
+            ).strip()
+        else:
+            model_input = user_input
 
         # -----------------------------------------------------
         # Deterministic factual grounding
@@ -1812,7 +2025,7 @@ class CauvisOrchestrator:
 
         include_capability_context = (
             self._should_include_verified_capability_context(
-                user_input
+                model_input
             )
         )
 
@@ -1825,6 +2038,22 @@ class CauvisOrchestrator:
                 ),
             )
         )
+
+        model_routed_segment_count = len(
+            model_analyses
+            if status_analyses
+            else request_analyses
+        )
+
+        if model_routed_segment_count > 1:
+            turn_system_prompt = (
+                turn_system_prompt
+                + "\n\n"
+                + "The current model-routed user request contains "
+                + "multiple distinct requested parts. Answer every "
+                + "part explicitly. Do not silently omit a part or "
+                + "merge separate questions into one answer."
+            )
 
         # Record the user's real turn after rendering history so
         # the current message is not duplicated in model context.
@@ -1842,7 +2071,7 @@ class CauvisOrchestrator:
 
         try:
             model_response = self.brain.think(
-                user_input,
+                model_input,
                 system_prompt=turn_system_prompt,
             )
 
@@ -1854,6 +2083,21 @@ class CauvisOrchestrator:
             model_response.metadata.setdefault(
                 "capability_grounding_included",
                 bool(include_capability_context),
+            )
+
+            model_response.metadata.setdefault(
+                "request_segment_count",
+                len(request_analyses),
+            )
+
+            model_response.metadata.setdefault(
+                "model_routed_segment_count",
+                model_routed_segment_count,
+            )
+
+            model_response.metadata.setdefault(
+                "deterministic_status_segment_count",
+                len(status_analyses),
             )
 
         except Exception as exc:
@@ -1919,11 +2163,18 @@ class CauvisOrchestrator:
 
             safe_model_text = (
                 self._apply_runtime_current_truth(
-                    user_input,
+                    model_input,
                     safe_model_text,
                     model_response,
                 )
             )
+
+            if deterministic_status_text:
+                safe_model_text = (
+                    deterministic_status_text
+                    + "\n\n"
+                    + safe_model_text
+                )
 
             self.conversation.append(
                 context.session_id,

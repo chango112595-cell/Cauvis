@@ -2,7 +2,7 @@
 
 **Purpose:** This file is the source of truth for continuing the Cauvis build across ChatGPT conversations. A new AI chat should read this file before making changes.
 
-**Last updated:** 2026-09-15
+**Last updated:** 2026-09-20
 **Current project path:** `C:\Users\Admin\Cauvis`
 **Current shell:** PowerShell, inside `(.venv)` at `C:\Users\Admin\Cauvis`
 **Python:** 3.11.9
@@ -7622,3 +7622,301 @@ At this checkpoint:
 - Inspect Git status and diff carefully before committing.
 - Exclude temporary diagnostic scripts, patch helpers, and backup files.
 - After a clean commit/push, continue with Round 2 Fix 7: broader multi-question handling.
+---
+
+# 2026-09-20 CHECKPOINT — ROUND 2 FIX 7 MULTI-QUESTION HANDLING
+
+## Status
+
+**Round 2 Fix 7 — Broader Multi-Question Handling: COMPLETE AND VALIDATED.**
+
+Permanent validation baseline:
+
+```text
+PASSED:  70
+FAILED:  0
+TOTAL:   70
+STATUS: ALL TESTS PASSED
+```
+
+Latest measured validation runtime:
+
+```text
+ELAPSED: 5.02 seconds
+```
+
+## What Fix 7 Added
+
+New file:
+
+```text
+core/request_segments.py
+```
+
+This introduces a conservative deterministic request-segmentation layer.
+
+The segmenter separates clearly distinct request parts using strong boundaries such as:
+
+- question marks
+- semicolons
+- newlines
+- sentence boundaries when the next phrase begins like another request
+- comma / conjunction boundaries when the next phrase begins like another request
+
+It deliberately avoids splitting ordinary grammatical conjunctions such as:
+
+```text
+Why do plants use water and carbon dioxide?
+```
+
+## Multi-Request Safety / Routing Rules
+
+The orchestrator now analyzes each request segment independently through the existing deterministic boundaries.
+
+### Mixed general + fresh/current external fact
+
+```text
+Explain photosynthesis, and who is the current president?
+```
+
+Behavior:
+
+```text
+general segment
++
+current/fresh segment
+→ whole turn fails closed
+→ no model call
+```
+
+### Mixed general + direct external action
+
+```text
+Explain photosynthesis, and open Notepad.
+```
+
+Behavior:
+
+```text
+general segment
++
+direct external action segment
+→ whole turn fails closed
+→ no model call
+→ no false execution claim
+```
+
+### Runtime/capability status + general model request
+
+```text
+What AI model are you using right now, and explain photosynthesis.
+```
+
+Behavior:
+
+```text
+status segment
+→ deterministic runtime truth
+
+general segment
+→ CauvisBrain / model route
+
+final response
+→ verified status text + model answer
+```
+
+Only the non-status portion is sent to the AI model.
+
+### All-status request bundle
+
+```text
+Who are you, who created you, and what AI model are you using right now?
+```
+
+Behavior:
+
+```text
+all segments are status/runtime truth
+→ deterministic status composition
+→ zero model calls
+```
+
+Runtime-only status bundles:
+
+```text
+deterministic_guard=runtime_current
+```
+
+Capability-only bundles:
+
+```text
+deterministic_guard=capability_status
+```
+
+Genuinely mixed runtime + capability status bundles may use:
+
+```text
+deterministic_guard=multi_status
+```
+
+### Multiple general questions
+
+```text
+What is photosynthesis, and how does chlorophyll help?
+```
+
+Both segments stay on one model turn. Cauvis adds an explicit instruction requiring the model to answer every requested part.
+
+## Permanent Test 70
+
+Added:
+
+```text
+Broader Multi-Question Handling
+```
+
+It verifies segmentation, fail-closed mixed current/action boundaries, mixed status + general routing, all-status deterministic handling, answer-all-parts prompting, and standalone identity compatibility.
+
+## Fix 7 Live Probe
+
+### MULTI_GENERAL
+
+```text
+status: success
+request_segment_count: 2
+model_routed_segment_count: 2
+deterministic_status_segment_count: 0
+total_turn_ms: 28092.731
+path: model_success
+model_called: True
+provider: ollama
+model: phi4-mini
+```
+
+Routing is correct. High latency is dominated by local model generation/output length, not routing.
+
+### STATUS_PLUS_GENERAL
+
+```text
+status: success
+request_segment_count: 2
+model_routed_segment_count: 1
+deterministic_status_segment_count: 1
+total_turn_ms: 5673.095
+path: model_success
+model_called: True
+provider: ollama
+model: phi4-mini
+```
+
+Correct: runtime status deterministic, only general question sent to model.
+
+### GENERAL_PLUS_CURRENT
+
+```text
+status: blocked
+request_segment_count: 2
+blocked_segment: who is the current president?
+total_turn_ms: 0.472
+path: blocked
+model_called: False
+deterministic_guard: factual_freshness
+block_reason: fresh_evidence_capability_unavailable
+retrieval_performed: False
+```
+
+### GENERAL_PLUS_ACTION
+
+```text
+status: blocked
+request_segment_count: 2
+blocked_segment: open Notepad.
+total_turn_ms: 0.375
+path: blocked
+model_called: False
+deterministic_guard: external_action
+block_reason: required_capability_unavailable
+action_performed: False
+```
+
+### ALL_STATUS
+
+```text
+status: success
+request_segment_count: 3
+deterministic_status_segment_count: 3
+total_turn_ms: 0.457
+path: deterministic_status
+model_called: False
+deterministic_guard: runtime_current
+provider: ollama
+model: phi4-mini
+```
+
+## Repair History
+
+Initial Fix 7 application produced malformed newline literals in `core/orchestrator.py`. A narrow repair corrected them.
+
+After that, Test 58 exposed telemetry compatibility: runtime identity + creator + model status had been reduced to `multi_status`. Production logic was corrected so runtime-only bundles report `runtime_current`, capability-only bundles report `capability_status`, and genuinely mixed status categories report `multi_status`.
+
+Final validation reached 70/70.
+
+## Current Round 2 Roadmap
+
+Completed:
+
+1. latency telemetry
+2. selective capability grounding
+3. compact prompt/runtime truth
+4. Ollama keep-alive
+5. deterministic runtime/capability truth
+6. broader multi-question handling
+
+Remaining:
+
+1. broader language handling
+2. uncertainty / factual nuance
+3. real retrieval execution + evidence bridge
+
+Next exact milestone:
+
+```text
+Round 2 Fix 8 — broader language handling
+```
+
+## Temporary Development Files
+
+Do not commit unless deliberately chosen:
+
+```text
+live_fix6b_performance_check.py
+live_fix6c_native_ollama_diagnostic.py
+live_fix6e_final_benchmark.py
+live_fix7_multi_question_probe.py
+live_latency_probe.py
+live_ollama_performance_diagnostic.py
+live_prompt_footprint_diagnostic.py
+
+update_cauvis_project_state_round2_performance.py
+patch_cauvis_round2_fix7_multi_question.py
+fix_cauvis_round2_fix7_newline_repair.py
+fix_cauvis_round2_fix7_runtime_guard_alignment.py
+```
+
+Patch-generated backup files should remain uncommitted.
+
+## Exact Resume Point
+
+- Fix 7 is applied locally.
+- Validation is 70/70.
+- Live multi-question probe passed all five cases.
+- Update `CAUVIS_PROJECT_STATE.md`.
+- Inspect Git status and diff.
+- Commit only:
+  - `CAUVIS_PROJECT_STATE.md`
+  - `core/request_segments.py`
+  - `core/orchestrator.py`
+  - `validate_cauvis.py`
+- Keep temporary patch/diagnostic/backup files untracked.
+- Push and verify remote.
+- Continue with Round 2 Fix 8 — broader language handling.
