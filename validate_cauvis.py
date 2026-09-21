@@ -11225,6 +11225,153 @@ def test_spanish_deterministic_routing():
     return True
 
 
+
+# ============================================================
+# TEST 72 - FACTUAL UNCERTAINTY / VERIFICATION BOUNDARY
+# ============================================================
+
+def test_factual_uncertainty_verification_boundary():
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.models import ModelResponse
+    from intelligence.router import AIModelRouter, ModelProvider
+    from intelligence.uncertainty import (
+        FactualUncertaintyClassifier,
+        VerificationRequestKind,
+    )
+
+    classifier = FactualUncertaintyClassifier()
+
+    assert classifier.classify(
+        "Can you verify that the Eiffel Tower is in Paris?"
+    ).kind == VerificationRequestKind.VERIFY
+
+    assert classifier.classify(
+        "Can you confirm that water freezes at 0 C?"
+    ).kind == VerificationRequestKind.CONFIRM
+
+    assert classifier.classify(
+        "Are you sure the Earth orbits the Sun?"
+    ).kind == VerificationRequestKind.CERTAINTY
+
+    spanish = classifier.classify(
+        "¿Puedes verificar si la Torre Eiffel está en París?"
+    )
+    assert spanish.requested is True
+    assert spanish.kind == VerificationRequestKind.VERIFY
+
+    class Provider(ModelProvider):
+        name = "verification-provider"
+        model = "verification-model"
+        credential_required = False
+        provider_types = {"local"}
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+            self.router.register_provider(Provider())
+
+        def think(self, user_input, system_prompt=None, provider_name=None):
+            calls.append(user_input)
+            return ModelResponse(
+                text="MODEL FACTUAL ANSWER",
+                model="verification-model",
+                provider="verification-provider",
+                success=True,
+            )
+
+    verify = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="fix9-verify",
+    )
+    blocked = verify.handle(
+        "Can you verify that the Eiffel Tower is in Paris?"
+    )
+    assert blocked.status == "blocked"
+    assert calls == []
+    assert blocked.data["verification_requested"] is True
+    assert blocked.data["independent_verification_performed"] is False
+    assert blocked.data["telemetry"]["model_called"] is False
+    assert blocked.data["telemetry"]["deterministic_guard"] == (
+        "independent_verification"
+    )
+
+    spanish_orch = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="fix9-spanish",
+    )
+    spanish_response = spanish_orch.handle(
+        "¿Puedes verificar si la Torre Eiffel está en París?"
+    )
+    assert spanish_response.status == "blocked"
+    assert calls == []
+    assert "verificación independiente" in spanish_response.message
+
+    mixed = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="fix9-mixed",
+    )
+    mixed_response = mixed.handle(
+        "Explain photosynthesis, and verify that water freezes at 0 C."
+    )
+    assert mixed_response.status == "blocked"
+    assert calls == []
+    assert mixed_response.data["request_segment_count"] == 2
+
+    runtime = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="fix9-runtime",
+    )
+    runtime_response = runtime.handle(
+        "Can you verify what AI model are you using right now?"
+    )
+    assert runtime_response.status == "success"
+    assert calls == []
+    assert "verification-provider" in runtime_response.message
+    assert "verification-model" in runtime_response.message
+    assert runtime_response.data["telemetry"]["model_called"] is False
+    assert runtime_response.data["telemetry"]["deterministic_guard"] == (
+        "runtime_current"
+    )
+
+    general = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="fix9-general",
+    )
+    general_response = general.handle(
+        "Explain photosynthesis in one short sentence."
+    )
+    assert general_response.status == "success"
+    assert len(calls) == 1
+    assert general_response.data["telemetry"]["model_called"] is True
+    assert (
+        "Never describe model-generated factual content as verified"
+        in general.system_prompt
+    )
+
+    print("VERIFICATION INTENT DETECTED:", True)
+    print("CONFIRMATION INTENT DETECTED:", True)
+    print("CERTAINTY INTENT DETECTED:", True)
+    print("SPANISH VERIFICATION DETECTED:", True)
+    print("INDEPENDENT EVIDENCE FAIL-CLOSED:", True)
+    print("MIXED VERIFICATION FAIL-CLOSED:", True)
+    print("RUNTIME TRUTH EXEMPTION:", True)
+    print("GENERAL MODEL PATH PRESERVED:", True)
+
+    return True
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -11431,6 +11578,10 @@ tests = [
     (
         "Spanish Deterministic Routing",
         test_spanish_deterministic_routing,
+    ),
+    (
+        "Factual Uncertainty / Verification Boundary",
+        test_factual_uncertainty_verification_boundary,
     ),
 ]
 

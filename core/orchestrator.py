@@ -18,6 +18,7 @@ from intelligence.brain import CauvisBrain
 from intelligence.factual_boundary import (
     FactualBoundaryClassifier,
 )
+from intelligence.uncertainty import FactualUncertaintyClassifier
 from intelligence.provider_config import ProviderConfigGate
 from intelligence.verified_capabilities import (
     VerifiedCapabilityBuilder,
@@ -50,6 +51,9 @@ class CauvisOrchestrator:
         self.request_segmenter = RequestSegmenter()
         self.factual_boundary_classifier = (
             FactualBoundaryClassifier()
+        )
+        self.factual_uncertainty_classifier = (
+            FactualUncertaintyClassifier()
         )
 
         self.session_id = str(
@@ -118,7 +122,10 @@ class CauvisOrchestrator:
             "will remember information across restarts or future sessions "
             "unless verified persistent memory is available. Do not invent "
             "Cauvis-specific tools, source components, capabilities, "
-            "memories, or actions. If unverified, say so."
+            "memories, or actions. If unverified, say so. Never describe "
+            "model-generated factual content as verified, confirmed, "
+            "fact-checked, or independently checked unless independent "
+            "evidence is present."
         )
 
 
@@ -159,6 +166,12 @@ class CauvisOrchestrator:
                 segment.text
             )
 
+            uncertainty = (
+                self.factual_uncertainty_classifier.classify(
+                    segment.text
+                )
+            )
+
             status_kind = None
 
             if factual.kind.value in {
@@ -173,6 +186,7 @@ class CauvisOrchestrator:
                     "text": segment.text,
                     "factual": factual,
                     "action": action,
+                    "uncertainty": uncertainty,
                     "status_kind": status_kind,
                 }
             )
@@ -365,6 +379,19 @@ class CauvisOrchestrator:
                 "web/recuperación en vivo no está disponible actualmente "
                 "en esta instancia. No puedo verificar una respuesta "
                 "actual usando solo el conocimiento del modelo.",
+            ),
+            (
+                "Cauvis recognized that you asked for independent "
+                "verification or confirmation, but this running instance "
+                "does not yet have a connected independent-evidence "
+                "bridge. I cannot honestly label a model-generated answer "
+                "as verified. I did not perform independent verification.",
+                "Cauvis reconoció que pediste verificación independiente "
+                "o confirmación, pero esta instancia todavía no tiene un "
+                "puente conectado de evidencia independiente. No puedo "
+                "presentar honestamente una respuesta generada por el "
+                "modelo como verificada. No realicé verificación "
+                "independiente.",
             ),
         )
 
@@ -650,6 +677,77 @@ class CauvisOrchestrator:
                 "request_segment_count": len(analyses),
                 "request_segments": self._request_segment_texts(analyses),
                 "blocked_segment": str(freshness_entry["text"]),
+            },
+        )
+
+
+
+    def _guard_independent_verification_request(
+        self,
+        user_input: str,
+        intent,
+        request_analyses=None,
+    ) -> CauvisResponse | None:
+        analyses = (
+            request_analyses
+            if request_analyses is not None
+            else self._analyze_request_segments(user_input)
+        )
+
+        verification_entry = next(
+            (
+                item
+                for item in analyses
+                if (
+                    item.get("status_kind") is None
+                    and item["uncertainty"].requires_independent_evidence
+                )
+            ),
+            None,
+        )
+
+        if verification_entry is None:
+            return None
+
+        decision = verification_entry["uncertainty"]
+
+        message = (
+            "Cauvis recognized that you asked for independent "
+            "verification or confirmation, but this running instance "
+            "does not yet have a connected independent-evidence "
+            "bridge. I cannot honestly label a model-generated answer "
+            "as verified. I did not perform independent verification."
+        )
+
+        message = self._localize_deterministic_message(
+            message,
+            RoutingLanguageNormalizer.language_hint(
+                str(verification_entry["text"])
+            ),
+        )
+
+        return CauvisResponse(
+            status="blocked",
+            message=message,
+            intent=intent.name,
+            confidence=intent.confidence,
+            data={
+                "input": user_input,
+                "verification_requested": True,
+                "verification_kind": decision.kind.value,
+                "verification_reason": decision.reason,
+                "verification_signals": list(decision.signals),
+                "requires_independent_evidence": True,
+                "independent_evidence_available": False,
+                "independent_verification_performed": False,
+                "retrieval_performed": False,
+                "model_called": False,
+                "block_reason": (
+                    "independent_evidence_bridge_not_connected"
+                ),
+                "request_segment_count": len(analyses),
+                "request_segments": self._request_segment_texts(analyses),
+                "blocked_segment": str(verification_entry["text"]),
             },
         )
 
@@ -2108,6 +2206,40 @@ class CauvisOrchestrator:
             )
 
             return freshness_guard_response
+
+        # -----------------------------------------------------
+        # Explicit independent-verification boundary
+        # -----------------------------------------------------
+
+        verification_guard_response = (
+            self._guard_independent_verification_request(
+                user_input,
+                intent,
+                request_analyses=request_analyses,
+            )
+        )
+
+        if verification_guard_response is not None:
+            guard_ms = self._elapsed_ms(
+                guard_started
+            )
+
+            verification_guard_response.data[
+                "telemetry"
+            ] = self._build_turn_telemetry(
+                turn_started=turn_started,
+                guard_ms=guard_ms,
+                context_ms=0.0,
+                brain_model_ms=0.0,
+                postprocess_ms=0.0,
+                path="blocked",
+                model_called=False,
+                deterministic_guard=(
+                    "independent_verification"
+                ),
+            )
+
+            return verification_guard_response
 
         guard_ms = self._elapsed_ms(
             guard_started

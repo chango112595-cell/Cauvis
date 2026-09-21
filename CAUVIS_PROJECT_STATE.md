@@ -8002,3 +8002,33 @@ Round 2 Fix 10 — real retrieval execution + evidence bridge
 ```
 
 Temporary patch, probe, validation-output, and backup files remain development-only and should not be committed.
+---
+
+# 2026-09-21 CHECKPOINT — ROUND 2 FIX 9 UNCERTAINTY / FACTUAL NUANCE
+
+## Status
+
+**Round 2 Fix 9 — Uncertainty / Factual Nuance: COMPLETE AND VALIDATED.**
+
+```text
+PASSED:  72
+FAILED:  0
+TOTAL:   72
+STATUS: ALL TESTS PASSED
+```
+
+## What Fix 9 Added
+
+- `intelligence/uncertainty.py`
+- verify / confirm / fact-check / certainty detection
+- independent-evidence fail-closed boundary
+- Spanish verification phrasing
+- mixed-request verification protection
+- runtime-truth exemption
+- permanent Test 72
+
+## Exact Resume Point
+
+```text
+Round 2 Fix 10 — real retrieval execution + evidence bridge
+```
