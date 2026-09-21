@@ -12,6 +12,7 @@ from core.intent import IntentDetector
 from core.response import CauvisResponse
 from core.action_request import ActionRequestDetector
 from core.request_segments import RequestSegmenter
+from core.routing_language import RoutingLanguageNormalizer
 
 from intelligence.brain import CauvisBrain
 from intelligence.factual_boundary import (
@@ -125,9 +126,12 @@ class CauvisOrchestrator:
     def _is_runtime_identity_segment(
         text: str,
     ) -> bool:
-        normalized = " ".join(
-            str(text).lower().strip().split()
-        ).rstrip(" ?.!,;:")
+        normalized = (
+            RoutingLanguageNormalizer.normalize(
+                text
+            )
+            .rstrip(" ?.!,;:")
+        )
 
         return normalized in {
             "who are you",
@@ -246,6 +250,130 @@ class CauvisOrchestrator:
             model_name,
         )
 
+    @staticmethod
+    def _localize_deterministic_message(
+        message: str,
+        language: str,
+    ) -> str:
+        if language != "es":
+            return message
+
+        value = str(message)
+
+        replacements = (
+            ("I am Cauvis.", "Soy Cauvis."),
+            (
+                "Cauvis was developed as part of the Cauvis project "
+                "by its project developer.",
+                "Cauvis fue desarrollado como parte del proyecto Cauvis "
+                "por el desarrollador del proyecto.",
+            ),
+            (
+                "Cauvis's current eligible AI provider is ",
+                "El proveedor de IA elegible actual de Cauvis es ",
+            ),
+            (
+                "Cauvis's current eligible AI model is ",
+                "El modelo de IA elegible actual de Cauvis es ",
+            ),
+            ("using model ", "usando el modelo "),
+            (
+                "This runtime-status response did not call that AI model.",
+                "Esta respuesta de estado del entorno no llamó a ese "
+                "modelo de IA.",
+            ),
+            (
+                "This runtime-status response did not call an AI model.",
+                "Esta respuesta de estado del entorno no llamó a un "
+                "modelo de IA.",
+            ),
+            (
+                "No configured, runtime-eligible AI model provider is "
+                "currently available.",
+                "No hay un proveedor de modelo de IA configurado y "
+                "elegible actualmente.",
+            ),
+            (
+                "Cauvis runtime status is available from deterministic "
+                "local runtime state.",
+                "El estado del entorno de Cauvis está disponible desde "
+                "el estado local determinista.",
+            ),
+            (
+                "Current Cauvis capability status:",
+                "Estado actual de capacidades de Cauvis:",
+            ),
+            (
+                "No external action was performed.",
+                "No se realizó ninguna acción externa.",
+            ),
+            (
+                "Currently verified as available:",
+                "Actualmente verificado como disponible:",
+            ),
+            (
+                "Currently unavailable or unconnected:",
+                "Actualmente no disponible o no conectado:",
+            ),
+            ("web browsing/actions", "navegación/acciones web"),
+            ("computer/system control", "control del sistema/computadora"),
+            ("file access/actions", "acceso/acciones de archivos"),
+            ("reminders", "recordatorios"),
+            (" is unavailable ", " no está disponible "),
+            (" is available ", " está disponible "),
+            (
+                "Cauvis recognized this as a direct external action "
+                "request, but this Beta conversation path does not yet "
+                "have a verified execution-result bridge. I did not "
+                "perform the action.",
+                "Cauvis reconoció esto como una solicitud de acción "
+                "externa directa, pero esta ruta de conversación Beta "
+                "aún no tiene un puente verificado de resultados de "
+                "ejecución. No realicé la acción.",
+            ),
+            (
+                "Cauvis cannot perform that external action in this "
+                "running instance because the required verified "
+                "capability ",
+                "Cauvis no puede realizar esa acción externa en esta "
+                "instancia porque la capacidad verificada requerida ",
+            ),
+            (
+                " is not currently available. I did not perform the action.",
+                " no está disponible actualmente. No realicé la acción.",
+            ),
+            (
+                "Cauvis recognized that this request requires "
+                "fresh/current external evidence, but this Beta "
+                "conversation path does not yet have a verified "
+                "retrieval-result evidence bridge. I cannot present "
+                "an unverified model answer as current information.",
+                "Cauvis reconoció que esta solicitud requiere evidencia "
+                "externa actual, pero esta ruta de conversación Beta aún "
+                "no tiene un puente verificado de evidencia de recuperación. "
+                "No puedo presentar una respuesta no verificada del modelo "
+                "como información actual.",
+            ),
+            (
+                "Cauvis recognized that this request requires "
+                "fresh/current external evidence, but verified live "
+                "web/retrieval capability is not currently available "
+                "in this running instance. I cannot verify a current "
+                "answer from model knowledge alone.",
+                "Cauvis reconoció que esta solicitud requiere evidencia "
+                "externa actual, pero la capacidad verificada de "
+                "web/recuperación en vivo no está disponible actualmente "
+                "en esta instancia. No puedo verificar una respuesta "
+                "actual usando solo el conocimiento del modelo.",
+            ),
+        )
+
+        for source, target in replacements:
+            value = value.replace(source, target)
+
+        return value
+
+
     def _guard_external_action_request(
         self,
         user_input: str,
@@ -347,6 +475,13 @@ class CauvisOrchestrator:
             block_reason = (
                 "required_capability_unavailable"
             )
+
+        message = self._localize_deterministic_message(
+            message,
+            RoutingLanguageNormalizer.language_hint(
+                str(action_entry["text"])
+            ),
+        )
 
         return CauvisResponse(
             status="blocked",
@@ -473,6 +608,13 @@ class CauvisOrchestrator:
             block_reason = (
                 "fresh_evidence_capability_unavailable"
             )
+
+        message = self._localize_deterministic_message(
+            message,
+            RoutingLanguageNormalizer.language_hint(
+                str(freshness_entry["text"])
+            ),
+        )
 
         return CauvisResponse(
             status="blocked",
@@ -635,8 +777,8 @@ class CauvisOrchestrator:
         self,
         user_input: str,
     ) -> tuple[str, str | None, str | None]:
-        normalized = " ".join(
-            str(user_input).lower().strip().split()
+        normalized = RoutingLanguageNormalizer.normalize(
+            user_input
         )
 
         provider = (
@@ -746,8 +888,15 @@ class CauvisOrchestrator:
                 "deterministic local runtime state."
             )
 
-        return (
+        message = self._localize_deterministic_message(
             " ".join(parts),
+            RoutingLanguageNormalizer.language_hint(
+                user_input
+            ),
+        )
+
+        return (
+            message,
             provider_name or None,
             model_name or None,
         )
@@ -768,8 +917,8 @@ class CauvisOrchestrator:
             )
         )
 
-        normalized = " ".join(
-            str(user_input).lower().strip().split()
+        normalized = RoutingLanguageNormalizer.normalize(
+            user_input
         )
 
         requested = []
@@ -848,10 +997,17 @@ class CauvisOrchestrator:
                     f"({capability.status.value})"
                 )
 
-            return (
+            message = (
                 "Current Cauvis capability status: "
                 + "; ".join(parts)
                 + ". No external action was performed."
+            )
+
+            return self._localize_deterministic_message(
+                message,
+                RoutingLanguageNormalizer.language_hint(
+                    user_input
+                ),
             )
 
         available = []
@@ -895,11 +1051,18 @@ class CauvisOrchestrator:
             else "none"
         )
 
-        return (
+        message = (
             "Currently verified as available: "
             f"{available_text}. "
             "Currently unavailable or unconnected: "
             f"{unavailable_text}."
+        )
+
+        return self._localize_deterministic_message(
+            message,
+            RoutingLanguageNormalizer.language_hint(
+                user_input
+            ),
         )
 
     def _handle_deterministic_status_request(
@@ -1297,8 +1460,8 @@ class CauvisOrchestrator:
         if decision.kind.value != "runtime_current":
             return text
 
-        normalized = " ".join(
-            str(user_input).lower().strip().split()
+        normalized = RoutingLanguageNormalizer.normalize(
+            user_input
         )
 
         asks_model = "model" in normalized

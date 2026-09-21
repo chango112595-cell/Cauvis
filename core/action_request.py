@@ -1,5 +1,7 @@
 ﻿from dataclasses import dataclass
 
+from core.routing_language import RoutingLanguageNormalizer
+
 
 @dataclass(frozen=True)
 class ActionRequest:
@@ -498,8 +500,8 @@ class ActionRequestDetector:
     def _normalize(
         text: str,
     ) -> str:
-        return " ".join(
-            text.lower().strip().split()
+        return RoutingLanguageNormalizer.normalize(
+            text
         )
 
     @staticmethod

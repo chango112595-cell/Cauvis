@@ -7920,3 +7920,85 @@ Patch-generated backup files should remain uncommitted.
 - Keep temporary patch/diagnostic/backup files untracked.
 - Push and verify remote.
 - Continue with Round 2 Fix 8 — broader language handling.
+
+---
+
+# 2026-09-21 CHECKPOINT — ROUND 2 FIX 8 BROADER LANGUAGE HANDLING
+
+## Status
+
+**Round 2 Fix 8 — Broader Language Handling: COMPLETE AND VALIDATED.**
+
+Validation target reached:
+
+```text
+PASSED:  71
+FAILED:  0
+TOTAL:   71
+STATUS: ALL TESTS PASSED
+```
+
+## What Fix 8 Added
+
+- Shared deterministic routing-language normalization in `core/routing_language.py`.
+- Spanish runtime/model/provider status routing.
+- Spanish capability-status routing.
+- Spanish direct-action detection and fail-closed handling.
+- Spanish current/live factual freshness detection.
+- Spanish multi-question segmentation using `y`.
+- Spanish instructional requests remain informational.
+- Original Spanish user text is preserved for the model path.
+- Deterministic Spanish status/block messages are localized.
+- Permanent Test 71: `Spanish Deterministic Routing`.
+
+## Safety / Truth Behavior
+
+Examples:
+
+```text
+¿Qué modelo de IA estás usando ahora mismo?
+→ deterministic runtime truth
+→ no model call
+```
+
+```text
+¿Puedes navegar por la web ahora mismo?
+→ deterministic capability truth
+→ no model call
+```
+
+```text
+Abre el Bloc de notas.
+→ direct action
+→ fail closed until verified execution bridge exists
+```
+
+```text
+¿Quién es el presidente actual?
+→ current/live factual request
+→ fail closed until verified retrieval evidence exists
+```
+
+```text
+¿Qué modelo de IA estás usando ahora mismo,
+y explica la fotosíntesis en una frase.
+→ status segment deterministic
+→ general Spanish segment routed to model
+→ original Spanish model input preserved
+```
+
+## Exact Resume Point
+
+Next milestone:
+
+```text
+Round 2 Fix 9 — uncertainty / factual nuance
+```
+
+After Fix 9:
+
+```text
+Round 2 Fix 10 — real retrieval execution + evidence bridge
+```
+
+Temporary patch, probe, validation-output, and backup files remain development-only and should not be committed.

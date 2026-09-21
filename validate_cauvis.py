@@ -10983,6 +10983,248 @@ def test_broader_multi_question_handling():
 
     return True
 
+
+# ============================================================
+# TEST 71 - SPANISH DETERMINISTIC ROUTING
+# ============================================================
+
+def test_spanish_deterministic_routing():
+    from core.action_request import ActionRequestDetector
+    from core.config import CauvisConfig
+    from core.intent import IntentDetector
+    from core.orchestrator import CauvisOrchestrator
+    from core.request_segments import RequestSegmenter
+    from core.routing_language import RoutingLanguageNormalizer
+    from intelligence.factual_boundary import (
+        FactualBoundaryClassifier,
+        FactualRequestKind,
+    )
+    from intelligence.models import ModelResponse
+    from intelligence.router import AIModelRouter, ModelProvider
+
+    normalizer = RoutingLanguageNormalizer()
+
+    assert normalizer.language_hint(
+        "¿Qué modelo de IA estás usando ahora mismo?"
+    ) == "es"
+
+    assert normalizer.normalize(
+        "¿Qué modelo de IA estás usando ahora mismo?"
+    ) == "what ai model are you using right now?"
+
+    assert normalizer.normalize(
+        "What AI model are you using right now?"
+    ) == "what ai model are you using right now?"
+
+    intents = IntentDetector()
+    assert intents.detect("Hola").name == "greeting"
+    assert intents.detect(
+        "¿Cómo funciona Cauvis?"
+    ).name == "question"
+
+    action_detector = ActionRequestDetector()
+
+    instructional = action_detector.detect(
+        "¿Cómo puedo abrir el Bloc de notas?"
+    )
+    assert instructional.requested is False
+
+    direct_action = action_detector.detect(
+        "Abre el Bloc de notas."
+    )
+    assert direct_action.requested is True
+    assert direct_action.required_capability == "system_actions"
+
+    classifier = FactualBoundaryClassifier()
+
+    runtime_decision = classifier.classify(
+        "¿Qué modelo de IA estás usando ahora mismo?"
+    )
+    assert runtime_decision.kind == FactualRequestKind.RUNTIME_CURRENT
+
+    capability_decision = classifier.classify(
+        "¿Puedes navegar por la web ahora mismo?"
+    )
+    assert capability_decision.kind == FactualRequestKind.CAPABILITY_STATUS
+
+    current_decision = classifier.classify(
+        "¿Quién es el presidente actual?"
+    )
+    assert current_decision.kind == FactualRequestKind.CURRENT
+    assert current_decision.requires_fresh_evidence
+    assert current_decision.requires_retrieval
+
+    segmenter = RequestSegmenter()
+    spanish_segments = segmenter.split(
+        (
+            "¿Qué modelo de IA estás usando ahora mismo, "
+            "y explica la fotosíntesis en una frase."
+        )
+    )
+
+    assert [segment.text for segment in spanish_segments] == [
+        "¿Qué modelo de IA estás usando ahora mismo",
+        "explica la fotosíntesis en una frase.",
+    ]
+
+    class SpanishProvider(ModelProvider):
+        name = "spanish-provider"
+        model = "spanish-model"
+        credential_required = False
+        provider_types = {"local"}
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+            self.router.register_provider(SpanishProvider())
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                {
+                    "user_input": user_input,
+                    "system_prompt": system_prompt or "",
+                }
+            )
+
+            return ModelResponse(
+                text="RESPUESTA DEL MODELO",
+                model="spanish-model",
+                provider="spanish-provider",
+                success=True,
+            )
+
+    runtime = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="spanish-runtime-test",
+    )
+
+    runtime_response = runtime.handle(
+        (
+            "¿Quién eres, quién te creó, y qué modelo de IA "
+            "estás usando ahora mismo?"
+        )
+    )
+
+    assert runtime_response.status == "success"
+    assert calls == []
+    assert "Soy Cauvis." in runtime_response.message
+    assert (
+        "Cauvis fue desarrollado como parte del proyecto Cauvis"
+        in runtime_response.message
+    )
+    assert "spanish-provider" in runtime_response.message
+    assert "spanish-model" in runtime_response.message
+    assert runtime_response.data["telemetry"]["model_called"] is False
+
+    capability = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="spanish-capability-test",
+    )
+
+    capability_response = capability.handle(
+        "¿Puedes navegar por la web ahora mismo?"
+    )
+
+    assert capability_response.status == "success"
+    assert calls == []
+    assert (
+        "Estado actual de capacidades de Cauvis"
+        in capability_response.message
+    )
+    assert capability_response.data["telemetry"]["model_called"] is False
+
+    action = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="spanish-action-test",
+    )
+
+    action_response = action.handle(
+        "Abre el Bloc de notas."
+    )
+
+    assert action_response.status == "blocked"
+    assert calls == []
+    assert (
+        action_response.data["required_capability"]
+        == "system_actions"
+    )
+    assert action_response.data["action_performed"] is False
+    assert "No realicé la acción." in action_response.message
+
+    freshness = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="spanish-freshness-test",
+    )
+
+    freshness_response = freshness.handle(
+        "¿Quién es el presidente actual?"
+    )
+
+    assert freshness_response.status == "blocked"
+    assert calls == []
+    assert freshness_response.data["retrieval_performed"] is False
+    assert freshness_response.data["telemetry"]["model_called"] is False
+    assert "evidencia externa actual" in freshness_response.message
+
+    mixed = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        session_id="spanish-mixed-test",
+    )
+
+    mixed_response = mixed.handle(
+        (
+            "¿Qué modelo de IA estás usando ahora mismo, "
+            "y explica la fotosíntesis en una frase."
+        )
+    )
+
+    assert mixed_response.status == "success"
+    assert len(calls) == 1
+    assert calls[0]["user_input"] == (
+        "explica la fotosíntesis en una frase."
+    )
+    assert (
+        "El proveedor de IA elegible actual de Cauvis"
+        in mixed_response.message
+    )
+    assert "RESPUESTA DEL MODELO" in mixed_response.message
+    assert mixed_response.data["metadata"]["request_segment_count"] == 2
+    assert mixed_response.data["metadata"][
+        "deterministic_status_segment_count"
+    ] == 1
+    assert mixed_response.data["metadata"][
+        "model_routed_segment_count"
+    ] == 1
+
+    print("SPANISH NORMALIZATION:", True)
+    print("SPANISH INSTRUCTIONAL SAFE:", True)
+    print("SPANISH DIRECT ACTION GUARDED:", True)
+    print("SPANISH CURRENT FACT GUARDED:", True)
+    print("SPANISH CAPABILITY STATUS:", True)
+    print("SPANISH RUNTIME STATUS:", True)
+    print("SPANISH MULTI-QUESTION ROUTING:", True)
+    print("ORIGINAL SPANISH MODEL INPUT PRESERVED:", True)
+
+    return True
+
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -11185,6 +11427,10 @@ tests = [
     (
         "Broader Multi-Question Handling",
         test_broader_multi_question_handling,
+    ),
+    (
+        "Spanish Deterministic Routing",
+        test_spanish_deterministic_routing,
     ),
 ]
 

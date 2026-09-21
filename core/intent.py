@@ -1,5 +1,7 @@
 ﻿from dataclasses import dataclass
 
+from core.routing_language import RoutingLanguageNormalizer
+
 
 @dataclass
 class Intent:
@@ -11,9 +13,16 @@ class Intent:
 class IntentDetector:
 
     def detect(self, text: str) -> Intent:
-        normalized = text.lower().strip()
+        normalized = RoutingLanguageNormalizer.surface(text)
+        routed = RoutingLanguageNormalizer.normalize(text)
 
-        if normalized in {"hello", "hi", "hey"}:
+        if normalized in {
+            "hello",
+            "hi",
+            "hey",
+            "hola",
+            "buenas",
+        }:
             return Intent(
                 name="greeting",
                 confidence=1.0,
@@ -36,14 +45,27 @@ class IntentDetector:
                 original_input=text,
             )
 
-        if normalized.startswith("what"):
-            return Intent(
-                name="question",
-                confidence=0.8,
-                original_input=text,
-            )
+        question_prefixes = (
+            "who ",
+            "what ",
+            "which ",
+            "when ",
+            "where ",
+            "why ",
+            "how ",
+            "can ",
+            "could ",
+            "would ",
+            "will ",
+            "should ",
+            "is ",
+            "are ",
+            "do ",
+            "does ",
+            "did ",
+        )
 
-        if normalized.startswith("how"):
+        if routed.startswith(question_prefixes):
             return Intent(
                 name="question",
                 confidence=0.8,

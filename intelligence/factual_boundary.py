@@ -2,6 +2,8 @@
 from enum import Enum
 import re
 
+from core.routing_language import RoutingLanguageNormalizer
+
 
 class FactualRequestKind(str, Enum):
     """
@@ -215,8 +217,8 @@ class FactualBoundaryClassifier:
         self,
         user_input: str,
     ) -> FactualBoundaryDecision:
-        text = " ".join(
-            str(user_input).lower().strip().split()
+        text = RoutingLanguageNormalizer.normalize(
+            user_input
         )
 
         if not text:

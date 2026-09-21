@@ -27,10 +27,19 @@ class RequestSegmenter:
         "delete", "move", "copy", "rename", "send", "click",
         "type", "install", "upload", "download", "remind",
         "write", "draft", "design", "create", "generate", "please",
+        "quién", "quien", "qué", "que", "cuál", "cual",
+        "cuándo", "cuando", "dónde", "donde", "cómo", "como",
+        "puedes", "podrías", "podrias", "es", "son",
+        "explica", "dime", "muestra", "muéstrame", "muestrame",
+        "busca", "navega", "verifica", "encuentra",
+        "abre", "cierra", "ejecuta", "inicia", "detén", "deten",
+        "elimina", "borra", "mueve", "copia", "renombra",
+        "envía", "envia", "instala", "sube", "descarga",
+        "recuérdame", "recuerdame", "escribe", "crea", "genera",
     )
 
     _STARTER_PATTERN = (
-        r"(?:"
+        r"[¿¡]?(?:"
         + "|".join(re.escape(value) for value in _REQUEST_STARTERS)
         + r")\b"
     )
@@ -46,7 +55,11 @@ class RequestSegmenter:
     )
 
     _AND_BOUNDARY = re.compile(
-        r"(?:,\s*|\s+)and\s+(?=" + _STARTER_PATTERN + r")",
+        (
+            r"(?:,\s*|\s+)(?:and|y)\s+(?="
+            + _STARTER_PATTERN
+            + r")"
+        ),
         re.IGNORECASE,
     )
 
