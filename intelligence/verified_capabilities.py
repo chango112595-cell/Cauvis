@@ -150,6 +150,7 @@ class VerifiedCapabilityBuilder:
         tool_registry: Any | None = None,
         worker_registry: Any | None = None,
         voice_runtime: Any | None = None,
+        retrieval_runtime: Any | None = None,
     ) -> VerifiedCapabilitySnapshot:
         capabilities: list[VerifiedCapability] = []
 
@@ -283,6 +284,12 @@ class VerifiedCapabilityBuilder:
             )
         )
 
+        capabilities.append(
+            self._retrieval_capability(
+                retrieval_runtime
+            )
+        )
+
         # These action classes require real execution/tool/worker
         # evidence. In Beta 1.2B they fail closed rather than
         # assuming availability from repository definitions.
@@ -353,6 +360,101 @@ class VerifiedCapabilityBuilder:
                 "request_requirements_are_not_runtime_truth": (
                     True
                 ),
+            },
+        )
+
+    @staticmethod
+    def _retrieval_capability(
+        retrieval_runtime: Any | None,
+    ) -> VerifiedCapability:
+        if retrieval_runtime is None:
+            return VerifiedCapability(
+                name="web_retrieval",
+                status=CapabilityTruthStatus.NOT_CONNECTED,
+                available=False,
+                description=(
+                    "Read-only live web retrieval and "
+                    "retrieval evidence transport."
+                ),
+                evidence=(
+                    "No WebRetrievalRuntime is attached.",
+                ),
+            )
+
+        attempted = bool(
+            getattr(
+                retrieval_runtime,
+                "last_attempted",
+                False,
+            )
+        )
+
+        succeeded = bool(
+            getattr(
+                retrieval_runtime,
+                "last_success",
+                False,
+            )
+        )
+
+        provider = getattr(
+            retrieval_runtime,
+            "last_provider",
+            None,
+        )
+
+        error = getattr(
+            retrieval_runtime,
+            "last_error",
+            None,
+        )
+
+        if succeeded:
+            status = CapabilityTruthStatus.AVAILABLE
+            available = True
+            evidence = (
+                "WebRetrievalRuntime is attached.",
+                "A live retrieval request succeeded.",
+            )
+
+        elif attempted:
+            status = CapabilityTruthStatus.UNAVAILABLE
+            available = False
+            evidence = (
+                "WebRetrievalRuntime is attached.",
+                "The most recent live retrieval attempt failed.",
+            )
+
+        else:
+            status = CapabilityTruthStatus.CONFIGURED
+            available = False
+            evidence = (
+                "WebRetrievalRuntime is attached.",
+                "Live retrieval availability has not yet "
+                "been observed in this process.",
+            )
+
+        return VerifiedCapability(
+            name="web_retrieval",
+            status=status,
+            available=available,
+            description=(
+                "Read-only live web retrieval and "
+                "retrieval evidence transport."
+            ),
+            evidence=evidence,
+            metadata={
+                "provider": (
+                    str(provider)
+                    if provider
+                    else None
+                ),
+                "last_error": (
+                    str(error)
+                    if error
+                    else None
+                ),
+                "attempted": attempted,
             },
         )
 

@@ -8191,6 +8191,25 @@ def test_factual_freshness_boundary():
     assert explicit.requires_fresh_evidence is True
     assert explicit.requires_retrieval is True
 
+    generic_current = classifier.classify(
+        "Who is the current example leader?"
+    )
+
+    assert (
+        generic_current.kind
+        == FactualRequestKind.CURRENT
+    )
+
+    assert (
+        generic_current.requires_fresh_evidence
+        is True
+    )
+
+    assert (
+        generic_current.requires_retrieval
+        is True
+    )
+
     empty = classifier.classify(
         ""
     )
@@ -8213,6 +8232,12 @@ def test_factual_freshness_boundary():
     print(
         "EXPLICIT RETRIEVAL:",
         explicit.kind.value,
+    )
+
+    print(
+        "GENERIC CURRENT:",
+        generic_current.kind.value,
+        generic_current.requires_retrieval,
     )
 
     print(
@@ -8334,7 +8359,7 @@ def test_deterministic_factual_freshness_guard():
         current_response.data[
             "required_capability"
         ]
-        == "web_actions"
+        == "web_retrieval"
     )
 
     assert (
@@ -8933,7 +8958,7 @@ def test_capability_status_vs_execution():
     assert response.status == "success"
 
     assert (
-        "web browsing/actions is unavailable "
+        "live web retrieval is unavailable "
         "(not_connected)"
         in response.message
     )
@@ -10701,7 +10726,7 @@ def test_deterministic_runtime_capability_status():
     assert calls == []
 
     assert (
-        "web browsing/actions is unavailable "
+        "live web retrieval is unavailable "
         "(not_connected)"
         in capability.message
     )
@@ -11372,6 +11397,293 @@ def test_factual_uncertainty_verification_boundary():
 
     return True
 
+
+# ============================================================
+# TEST 73 - REAL RETRIEVAL EXECUTION + EVIDENCE BRIDGE
+# ============================================================
+
+def test_real_retrieval_evidence_bridge():
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.models import ModelResponse
+    from intelligence.retrieval import WebRetrievalRuntime
+    from intelligence.router import AIModelRouter, ModelProvider
+    from intelligence.verified_capabilities import (
+        CapabilityTruthStatus,
+        VerifiedCapabilityBuilder,
+    )
+
+    search_html = """
+    <html>
+      <body>
+        <div class="result">
+          <a class="result__a"
+             href="https://example.com/current">
+             Current Example
+          </a>
+          <a class="result__snippet">
+             Current retrieved evidence for the requested fact.
+          </a>
+        </div>
+        <div class="result">
+          <a class="result__a"
+             href="https://example.org/second">
+             Second Source
+          </a>
+          <a class="result__snippet">
+             Independent second retrieved source.
+          </a>
+        </div>
+      </body>
+    </html>
+    """
+
+    def transport(url, headers, timeout):
+        if "duckduckgo.com" in url:
+            return 200, search_html
+
+        raise AssertionError(
+            "Wikipedia fallback should not be needed "
+            "for the successful test transport."
+        )
+
+    retrieval = WebRetrievalRuntime(
+        transport=transport,
+        max_results=3,
+    )
+
+    direct = retrieval.search(
+        "current example fact"
+    )
+
+    assert direct.success is True
+    assert len(direct.documents) == 2
+    assert retrieval.available is True
+    assert direct.documents[0].url == (
+        "https://example.com/current"
+    )
+
+    capability = VerifiedCapabilityBuilder().build(
+        router=None,
+        conversation_connected=True,
+        brain_connected=True,
+        retrieval_runtime=retrieval,
+    ).get("web_retrieval")
+
+    assert capability is not None
+    assert capability.available is True
+    assert (
+        capability.status
+        == CapabilityTruthStatus.AVAILABLE
+    )
+
+    class Provider(ModelProvider):
+        name = "retrieval-provider"
+        model = "retrieval-model"
+        credential_required = False
+        provider_types = {"local"}
+
+    calls = []
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+            self.router.register_provider(Provider())
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                {
+                    "user_input": user_input,
+                    "system_prompt": system_prompt or "",
+                }
+            )
+
+            return ModelResponse(
+                text="RETRIEVAL-BACKED ANSWER",
+                model="retrieval-model",
+                provider="retrieval-provider",
+                success=True,
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        retrieval_runtime=retrieval,
+        session_id="fix10-current",
+    )
+
+    current = orchestrator.handle(
+        "Who is the current example leader?"
+    )
+
+    assert current.status == "success"
+    assert len(calls) == 1
+    assert (
+        calls[-1]["user_input"]
+        == (
+            "Synthesize the answer from the retrieved "
+            "evidence supplied in the system prompt."
+        )
+    ), (
+        "Unexpected retrieval synthesis handoff: "
+        + repr(calls[-1]["user_input"])
+    )
+    assert "<retrieved_evidence>" in calls[-1]["system_prompt"]
+    assert "https://example.com/current" in calls[-1]["system_prompt"]
+    assert "Sources:" in current.message
+    assert "https://example.com/current" in current.message
+    assert current.data["retrieval_performed"] is True
+    assert current.data["retrieval_source_count"] == 2
+    assert current.data["metadata"]["retrieval_grounding_included"] is True
+    assert current.data["evidence"]
+    assert (
+        current.data["evidence"][0]["evidence"][0]["source_type"]
+        == "retrieval"
+    )
+
+    # Direct read-only web-search commands now route through the
+    # retrieval bridge instead of the generic external-action guard.
+    explicit = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        retrieval_runtime=retrieval,
+        session_id="fix10-explicit",
+    )
+
+    explicit_response = explicit.handle(
+        "Search the web for Python 3.14."
+    )
+
+    assert explicit_response.status == "success"
+    assert explicit_response.data["retrieval_performed"] is True
+
+    # Explicit verification now retrieves independent evidence and
+    # reaches synthesis rather than failing closed before retrieval.
+    verify = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        retrieval_runtime=retrieval,
+        session_id="fix10-verify",
+    )
+
+    verify_response = verify.handle(
+        "Can you verify that the Eiffel Tower is in Paris?"
+    )
+
+    assert verify_response.status == "success"
+    assert verify_response.data["retrieval_performed"] is True
+
+    # Retrieval failure remains fail-closed.
+    def failing_transport(url, headers, timeout):
+        return 503, "unavailable"
+
+    failing_retrieval = WebRetrievalRuntime(
+        transport=failing_transport,
+        max_results=2,
+    )
+
+    failed_calls = []
+
+    class FailingBrain(FakeBrain):
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            failed_calls.append(user_input)
+            return super().think(
+                user_input,
+                system_prompt=system_prompt,
+                provider_name=provider_name,
+            )
+
+    failed = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FailingBrain(),
+        retrieval_runtime=failing_retrieval,
+        session_id="fix10-failure",
+    )
+
+    failed_response = failed.handle(
+        "Who is the current example leader?"
+    )
+
+    assert failed_response.status == "blocked"
+    assert failed_calls == []
+    assert (
+        failed_response.data["telemetry"]["model_called"]
+        is False
+    )
+    assert (
+        failed_response.data["telemetry"]["deterministic_guard"]
+        == "factual_freshness"
+    )
+
+    # Browser-changing/system-like actions remain protected.
+    click = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        retrieval_runtime=retrieval,
+        session_id="fix10-click",
+    )
+
+    click_response = click.handle(
+        "Click the first result."
+    )
+
+    assert click_response.status == "blocked"
+    assert (
+        click_response.data["telemetry"]["deterministic_guard"]
+        == "external_action"
+    )
+
+    # Once retrieval has succeeded, capability truth can report
+    # read-only web retrieval as available.
+    capability_orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=FakeBrain(),
+        retrieval_runtime=retrieval,
+        session_id="fix10-capability",
+    )
+
+    capability_response = capability_orchestrator.handle(
+        "Can you search the web right now?"
+    )
+
+    assert capability_response.status == "success"
+    assert (
+        "live web retrieval is available"
+        in capability_response.message.lower()
+    )
+    assert (
+        capability_response.data["telemetry"]["model_called"]
+        is False
+    )
+
+    print("REAL RETRIEVAL RESULT PARSED:", True)
+    print("WEB RETRIEVAL CAPABILITY AVAILABLE:", True)
+    print("CURRENT FACT RETRIEVAL ROUTED:", True)
+    print("EXPLICIT SEARCH RETRIEVAL ROUTED:", True)
+    print("VERIFICATION RETRIEVAL ROUTED:", True)
+    print("RETRIEVAL EVIDENCE TRANSPORTED:", True)
+    print("DETERMINISTIC SOURCES APPENDED:", True)
+    print("RETRIEVAL FAILURE FAIL-CLOSED:", True)
+    print("MUTATING ACTION GUARD PRESERVED:", True)
+
+    return True
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -11582,6 +11894,10 @@ tests = [
     (
         "Factual Uncertainty / Verification Boundary",
         test_factual_uncertainty_verification_boundary,
+    ),
+    (
+        "Real Retrieval Execution + Evidence Bridge",
+        test_real_retrieval_evidence_bridge,
     ),
 ]
 

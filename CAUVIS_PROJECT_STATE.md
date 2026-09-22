@@ -8032,3 +8032,55 @@ STATUS: ALL TESTS PASSED
 ```text
 Round 2 Fix 10 — real retrieval execution + evidence bridge
 ```
+---
+
+# 2026-09-22 CHECKPOINT — ROUND 2 FIX 10 REAL RETRIEVAL + EVIDENCE BRIDGE
+
+## Status
+
+**Round 2 Fix 10 — Real Retrieval + Evidence Bridge: COMPLETE AND VALIDATED.**
+
+```text
+PASSED:  73
+FAILED:  0
+TOTAL:   73
+STATUS: ALL TESTS PASSED
+```
+
+## Root Cause Resolved
+
+The final Fix 10 blocker was the factual freshness classifier.
+
+The request:
+
+```text
+Who is the current example leader?
+```
+
+was incorrectly classified as:
+
+```text
+GENERAL
+requires_fresh_evidence = False
+requires_retrieval = False
+```
+
+because the classifier only recognized `current` for a hard-coded entity list.
+
+Fix 10 now includes a conservative generic current-question pattern that
+runs after runtime-status, capability-status, explicit retrieval, and
+user-assertion handling.
+
+Permanent Test 55 now includes the generic-current regression.
+
+Strict Test 73 validates the full retrieval-to-synthesis path.
+
+## Round 2 Status
+
+**COMPLETE THROUGH FIX 10.**
+
+## Exact Resume Point
+
+```text
+EXECUTION BRIDGE
+```

@@ -190,6 +190,17 @@ class FactualBoundaryClassifier:
         re.IGNORECASE,
     )
 
+    _GENERIC_CURRENT_REQUEST_PATTERN = re.compile(
+        (
+            r"^(?:who|what|which|where|when|why|how|"
+            r"is|are|can|could|would|will|"
+            r"tell\s+me|give\s+me|show\s+me|"
+            r"find|check|verify)\b"
+            r".{0,180}\bcurrent\b"
+        ),
+        re.IGNORECASE,
+    )
+
     _CURRENT_ASSERTION_PATTERN = re.compile(
         r"\bcurrent\s+("
         r"president|"
@@ -312,6 +323,15 @@ class FactualBoundaryClassifier:
 
         if current_match:
             current_signals.append(current_match.group(0))
+
+        generic_current_match = (
+            self._GENERIC_CURRENT_REQUEST_PATTERN.search(
+                text
+            )
+        )
+
+        if generic_current_match:
+            current_signals.append("current")
 
         for pattern in self._LIVE_DOMAIN_PATTERNS:
             match = re.search(
