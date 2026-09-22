@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 from enum import Enum
 
 
@@ -51,11 +51,13 @@ class PermissionManager:
             "system.status",
             "web.search",
             "web.read",
+            "filesystem.read",
             "vision.analyze",
         }
 
         approval_actions = {
             "application.launch",
+            "web.open_url",
             "filesystem.write",
             "filesystem.copy",
             "filesystem.move",

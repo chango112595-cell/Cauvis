@@ -290,9 +290,9 @@ class VerifiedCapabilityBuilder:
             )
         )
 
-        # These action classes require real execution/tool/worker
-        # evidence. In Beta 1.2B they fail closed rather than
-        # assuming availability from repository definitions.
+        # Functional Core: action capability truth is established
+        # only when the execution runtime is attached AND at least
+        # one enabled tool has a real handler bound to that capability.
         action_runtime_connected = bool(
             execution_engine is not None
             and tool_registry is not None
@@ -301,7 +301,7 @@ class VerifiedCapabilityBuilder:
         for name, description in (
             (
                 "filesystem_actions",
-                "Filesystem-changing actions.",
+                "Filesystem read/create/write actions.",
             ),
             (
                 "system_actions",
@@ -309,28 +309,47 @@ class VerifiedCapabilityBuilder:
             ),
             (
                 "web_actions",
-                "Live web/browser actions.",
+                "Bound URL/browser actions.",
             ),
             (
                 "reminders",
                 "Scheduled reminder actions.",
             ),
         ):
-            if action_runtime_connected:
+            bound = (
+                action_runtime_connected
+                and self._tool_capability_bound(
+                    tool_registry,
+                    name,
+                )
+            )
+
+            if bound:
                 capabilities.append(
                     VerifiedCapability(
                         name=name,
-                        status=(
-                            CapabilityTruthStatus.NOT_VERIFIED
+                        status=CapabilityTruthStatus.AVAILABLE,
+                        available=True,
+                        description=description,
+                        evidence=(
+                            "ExecutionEngine and ToolRegistry are attached.",
+                            "At least one enabled executable tool handler "
+                            "is bound to this capability.",
                         ),
+                    )
+                )
+
+            elif action_runtime_connected:
+                capabilities.append(
+                    VerifiedCapability(
+                        name=name,
+                        status=CapabilityTruthStatus.NOT_VERIFIED,
                         available=False,
                         description=description,
                         evidence=(
-                            "Execution and tool runtimes are "
-                            "connected, but this specific "
-                            "capability has not yet been "
-                            "verified from bound executable "
-                            "handlers.",
+                            "Execution and tool runtimes are connected, "
+                            "but no enabled executable tool handler is "
+                            "bound to this specific capability.",
                         ),
                     )
                 )
@@ -339,14 +358,12 @@ class VerifiedCapabilityBuilder:
                 capabilities.append(
                     VerifiedCapability(
                         name=name,
-                        status=(
-                            CapabilityTruthStatus.NOT_CONNECTED
-                        ),
+                        status=CapabilityTruthStatus.NOT_CONNECTED,
                         available=False,
                         description=description,
                         evidence=(
-                            "No verified execution/tool path is "
-                            "attached for this action class.",
+                            "No verified execution/tool path is attached "
+                            "for this action class.",
                         ),
                     )
                 )
@@ -362,6 +379,35 @@ class VerifiedCapabilityBuilder:
                 ),
             },
         )
+
+    @staticmethod
+    def _tool_capability_bound(
+        tool_registry: Any | None,
+        capability_name: str,
+    ) -> bool:
+        if tool_registry is None:
+            return False
+
+        try:
+            tools = tool_registry.list_enabled()
+        except Exception:
+            return False
+
+        for tool in tools:
+            if (
+                getattr(tool, "handler", None) is not None
+                and capability_name
+                in set(
+                    getattr(
+                        tool,
+                        "capabilities",
+                        set(),
+                    )
+                )
+            ):
+                return True
+
+        return False
 
     @staticmethod
     def _retrieval_capability(

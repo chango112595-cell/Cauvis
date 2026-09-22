@@ -8,7 +8,7 @@ def main():
 
     print("=" * 50)
     print(f"{config.name} v{config.version}")
-    print("Cauvis Beta 1 online.")
+    print("Cauvis Functional Core online.")
     print("=" * 50)
 
     while cauvis.state.running:

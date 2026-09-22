@@ -11419,19 +11419,21 @@ def test_real_retrieval_evidence_bridge():
         <div class="result">
           <a class="result__a"
              href="https://example.com/current">
-             Current Example
+             Current Example Leader Python 3.14 Eiffel Tower Paris
           </a>
           <a class="result__snippet">
-             Current retrieved evidence for the requested fact.
+             Current example fact and leader evidence. Python 3.14
+             release information. The Eiffel Tower is in Paris.
           </a>
         </div>
         <div class="result">
           <a class="result__a"
              href="https://example.org/second">
-             Second Source
+             Independent Example Python Eiffel Paris Source
           </a>
           <a class="result__snippet">
-             Independent second retrieved source.
+             Independent second source about the current example
+             leader, Python 3.14, and the Eiffel Tower in Paris.
           </a>
         </div>
       </body>
@@ -11684,6 +11686,596 @@ def test_real_retrieval_evidence_bridge():
 
     return True
 
+
+# ============================================================
+# TEST 74 - PHASE 3A RETRIEVAL QUERY QUALITY
+# ============================================================
+
+def test_phase3a_retrieval_query_quality():
+    from intelligence.retrieval import WebRetrievalRuntime
+    from intelligence.retrieval_query import RetrievalQueryPlanner
+
+    planner = RetrievalQueryPlanner()
+
+    python_plan = planner.plan(
+        "Search the web for the latest Python release."
+    )
+
+    assert "search the web" not in python_plan.search_query.lower()
+    assert "python" in python_plan.significant_terms
+    assert "python.org" in python_plan.preferred_domains
+    assert "python" in python_plan.wikipedia_query
+    assert "release" in python_plan.wikipedia_query
+
+    microsoft_plan = planner.plan(
+        "Can you verify who the current CEO of Microsoft is?"
+    )
+
+    assert "microsoft" in microsoft_plan.significant_terms
+    assert "ceo" in microsoft_plan.significant_terms
+    assert "microsoft.com" in microsoft_plan.preferred_domains
+
+    html = """
+    <html><body>
+      <div class="result">
+        <a class="result__a" href="https://example.com/random">
+          Unrelated Web Crawler
+        </a>
+        <a class="result__snippet">
+          Generic crawling information.
+        </a>
+      </div>
+      <div class="result">
+        <a class="result__a" href="https://www.python.org/downloads/">
+          Download Python
+        </a>
+        <a class="result__snippet">
+          Latest Python releases and downloads.
+        </a>
+      </div>
+    </body></html>
+    """
+
+    def transport(url, headers, timeout):
+        if "duckduckgo.com" in url:
+            return 200, html
+
+        raise AssertionError(
+            "Wikipedia fallback should not be required."
+        )
+
+    runtime = WebRetrievalRuntime(
+        transport=transport,
+        max_results=2,
+    )
+
+    result = runtime.search(
+        "Search the web for the latest Python release."
+    )
+
+    assert result.success is True
+    assert result.documents
+    assert result.documents[0].url == (
+        "https://www.python.org/downloads/"
+    )
+    assert all(
+        "random" not in item.url
+        for item in result.documents
+    )
+    assert (
+        result.metadata["query_plan"]["preferred_domains"]
+        == ["python.org"]
+    )
+
+    print("QUERY CLEANUP:", python_plan.search_query)
+    print("WIKIPEDIA QUERY:", python_plan.wikipedia_query)
+    print("AUTHORITATIVE DOMAIN HINT:", True)
+    print("IRRELEVANT RESULT FILTERED:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 75 - PHASE 3A FUNCTIONAL EXECUTION RUNTIME
+# ============================================================
+
+def test_phase3a_functional_execution_runtime():
+    from pathlib import Path
+    import tempfile
+
+    from core.action_request import ActionRequestDetector
+    from execution.functional_runtime import (
+        build_functional_execution_runtime,
+    )
+    from tools.filesystem_actions import FilesystemActionRuntime
+    from tools.windows_actions import WindowsActionRuntime
+
+    class FakeProcess:
+        pid = 4321
+
+        @staticmethod
+        def poll():
+            return None
+
+    launches = []
+
+    def launcher(command):
+        launches.append(list(command))
+        return FakeProcess()
+
+    opened_urls = []
+
+    def browser_opener(url):
+        opened_urls.append(url)
+        return True
+
+    with tempfile.TemporaryDirectory() as temporary:
+        home = Path(temporary) / "home"
+        project = home / "Cauvis"
+        documents = home / "Documents"
+
+        project.mkdir(parents=True)
+        documents.mkdir(parents=True)
+
+        windows = WindowsActionRuntime(
+            launcher=launcher,
+            browser_opener=browser_opener,
+            environment={},
+        )
+
+        filesystem = FilesystemActionRuntime(
+            project_root=project,
+            home=home,
+        )
+
+        runtime = build_functional_execution_runtime(
+            project_root=project,
+            windows_runtime=windows,
+            filesystem_runtime=filesystem,
+        )
+
+        detector = ActionRequestDetector()
+
+        launch = runtime.action_bridge.execute(
+            "Open Notepad.",
+            detector.detect("Open Notepad."),
+            explicit_user_request=True,
+        )
+
+        assert launch.success is True
+        assert launch.action_performed is True
+        assert launch.tool_name == "application.launch"
+        assert launches
+        assert "notepad" in str(launches[0][0]).lower()
+
+        create = runtime.action_bridge.execute(
+            (
+                "Create a text file called phase3a.txt "
+                "in my Documents with text Hello Phase 3A"
+            ),
+            detector.detect(
+                (
+                    "Create a text file called phase3a.txt "
+                    "in my Documents with text Hello Phase 3A"
+                )
+            ),
+            explicit_user_request=True,
+        )
+
+        assert create.success is True
+        assert create.verification_success is True
+
+        target = documents / "phase3a.txt"
+
+        assert target.is_file()
+        assert target.read_text(
+            encoding="utf-8"
+        ) == "Hello Phase 3A"
+
+        read = runtime.action_bridge.execute(
+            'Read "'
+            + str(target)
+            + '".',
+            detector.detect(
+                'Read "'
+                + str(target)
+                + '".'
+            ),
+            explicit_user_request=True,
+        )
+
+        assert read.success is True
+        assert "Hello Phase 3A" in read.message
+
+        protected = runtime.action_bridge.execute(
+            'Delete "'
+            + str(target)
+            + '".',
+            detector.detect(
+                'Delete "'
+                + str(target)
+                + '".'
+            ),
+            explicit_user_request=True,
+        )
+
+        assert protected.status == "blocked"
+        assert protected.action_performed is False
+        assert target.is_file()
+
+        system_tools = (
+            runtime.tool_registry.find_by_capability(
+                "system_actions"
+            )
+        )
+
+        file_tools = (
+            runtime.tool_registry.find_by_capability(
+                "filesystem_actions"
+            )
+        )
+
+        assert system_tools
+        assert file_tools
+
+    print("APP LAUNCH EXECUTED:", True)
+    print("FILE CREATE VERIFIED:", True)
+    print("FILE READ VERIFIED:", True)
+    print("DELETE REMAINS PROTECTED:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 76 - PHASE 3A ORCHESTRATOR EXECUTION BRIDGE
+# ============================================================
+
+def test_phase3a_orchestrator_execution_bridge():
+    from pathlib import Path
+    import tempfile
+
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from execution.functional_runtime import (
+        build_functional_execution_runtime,
+    )
+    from intelligence.models import ModelResponse
+    from intelligence.router import AIModelRouter
+    from tools.filesystem_actions import FilesystemActionRuntime
+    from tools.windows_actions import WindowsActionRuntime
+
+    class FakeProcess:
+        pid = 1234
+
+        @staticmethod
+        def poll():
+            return None
+
+    def launcher(command):
+        return FakeProcess()
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+            self.calls = []
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            self.calls.append(user_input)
+
+            return ModelResponse(
+                text="MODEL SHOULD NOT EXECUTE ACTIONS",
+                model="fake",
+                provider="fake",
+                success=True,
+            )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        home = Path(temporary) / "home"
+        project = home / "Cauvis"
+
+        project.mkdir(parents=True)
+
+        runtime = build_functional_execution_runtime(
+            project_root=project,
+            windows_runtime=WindowsActionRuntime(
+                launcher=launcher,
+                browser_opener=lambda url: True,
+                environment={},
+            ),
+            filesystem_runtime=FilesystemActionRuntime(
+                project_root=project,
+                home=home,
+            ),
+        )
+
+        brain = FakeBrain()
+
+        orchestrator = CauvisOrchestrator(
+            CauvisConfig(),
+            enable_ai=True,
+            brain=brain,
+            session_id="phase3a-execution",
+            functional_execution_runtime=runtime,
+        )
+
+        response = orchestrator.handle(
+            "Open Notepad."
+        )
+
+        assert response.status == "success"
+        assert response.data["action_performed"] is True
+        assert response.data["model_called"] is False
+        assert (
+            response.data["telemetry"]["path"]
+            == "execution_success"
+        )
+        assert brain.calls == []
+
+        capability = orchestrator.handle(
+            (
+                "Can you control my computer, access my files, "
+                "and set reminders right now?"
+            )
+        )
+
+        lower = capability.message.lower()
+
+        assert "computer/system control is available" in lower
+        assert "file access/actions is available" in lower
+        assert "reminders is unavailable" in lower
+
+    print("CHAT -> EXECUTION BRIDGE:", True)
+    print("MODEL BYPASS FOR ACTION:", True)
+    print("SYSTEM CAPABILITY TRUE:", True)
+    print("FILESYSTEM CAPABILITY TRUE:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 77 - PHASE 3A FAST GREETING + FAILURE TRUTH
+# ============================================================
+
+def test_phase3a_fast_greeting_and_failure_truth():
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.models import ModelResponse
+    from intelligence.providers.openai_responses import (
+        OpenAIResponsesProvider,
+    )
+    from intelligence.router import AIModelRouter, ModelProvider
+
+    class LocalProvider(ModelProvider):
+        name = "local-test"
+        model = "local-model"
+        credential_required = False
+        provider_types = {"local"}
+        capabilities = {
+            "chat",
+            "reasoning",
+            "complexity:low",
+            "complexity:medium",
+            "complexity:high",
+        }
+
+    class Brain:
+        def __init__(self):
+            self.router = AIModelRouter()
+            self.router.register_provider(LocalProvider())
+            self.router.register_provider(
+                OpenAIResponsesProvider(
+                    model="cloud-test",
+                    environment={},
+                )
+            )
+            self.calls = []
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            self.calls.append(user_input)
+
+            return ModelResponse(
+                text="",
+                model="local-model",
+                provider="local-test",
+                success=False,
+                error="LOCAL TEST FAILURE",
+            )
+
+    brain = Brain()
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=brain,
+        session_id="phase3a-greeting",
+    )
+
+    greeting = orchestrator.handle(
+        "hello cauvis"
+    )
+
+    assert greeting.status == "success"
+    assert brain.calls == []
+    assert (
+        greeting.data["telemetry"]["model_called"]
+        is False
+    )
+    assert (
+        greeting.data["telemetry"]["deterministic_guard"]
+        == "greeting"
+    )
+
+    failure = orchestrator.handle(
+        "Explain photosynthesis."
+    )
+
+    assert failure.status == "error"
+    assert "LOCAL TEST FAILURE" in failure.message
+    assert "OPENAI_API_KEY" not in failure.message
+    assert "OpenAI provider is not configured" not in failure.message
+
+    print("GREETING MODEL CALLS:", 0)
+    print("MISLEADING OPENAI ERROR REMOVED:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 78 - PHASE 3A LOCAL SYNTHESIS + OLLAMA BOUND
+# ============================================================
+
+def test_phase3a_local_synthesis_and_ollama_bound():
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from intelligence.models import ModelRequest, ModelResponse
+    from intelligence.providers.ollama import OllamaProvider
+    from intelligence.retrieval import WebRetrievalRuntime
+    from intelligence.router import AIModelRouter, ModelProvider
+
+    payloads = []
+
+    def ollama_transport(url, headers, payload, timeout):
+        payloads.append(payload)
+
+        return (
+            200,
+            {
+                "model": "phase3a-model",
+                "message": {
+                    "content": "OK",
+                },
+                "done": True,
+            },
+        )
+
+    provider = OllamaProvider(
+        model="phase3a-model",
+        transport=ollama_transport,
+        keep_alive="30m",
+    )
+
+    generated = provider.generate(
+        ModelRequest(
+            prompt="hello",
+        )
+    )
+
+    assert generated.success is True
+    assert payloads
+    assert (
+        payloads[0]["options"]["num_predict"]
+        == 256
+    )
+
+    html = """
+    <html><body>
+      <div class="result">
+        <a class="result__a" href="https://www.microsoft.com/en-us/about">
+          Microsoft Leadership
+        </a>
+        <a class="result__snippet">
+          Microsoft leadership and CEO information.
+        </a>
+      </div>
+    </body></html>
+    """
+
+    def retrieval_transport(url, headers, timeout):
+        if "duckduckgo.com" in url:
+            return 200, html
+
+        raise AssertionError(
+            "Fallback should not be needed."
+        )
+
+    retrieval = WebRetrievalRuntime(
+        transport=retrieval_transport,
+        max_results=2,
+    )
+
+    class LocalSynthesisProvider(ModelProvider):
+        name = "local-synthesis"
+        model = "local-synthesis-model"
+        credential_required = False
+        provider_types = {"local"}
+        capabilities = {
+            "chat",
+            "reasoning",
+            "complexity:low",
+            "complexity:medium",
+            "complexity:high",
+        }
+
+    calls = []
+
+    class Brain:
+        def __init__(self):
+            self.router = AIModelRouter()
+            self.router.register_provider(
+                LocalSynthesisProvider()
+            )
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            calls.append(
+                {
+                    "user_input": user_input,
+                    "provider_name": provider_name,
+                    "system_prompt": system_prompt or "",
+                }
+            )
+
+            return ModelResponse(
+                text="Microsoft CEO verification answer.",
+                model="local-synthesis-model",
+                provider="local-synthesis",
+                success=True,
+            )
+
+    orchestrator = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        brain=Brain(),
+        retrieval_runtime=retrieval,
+        session_id="phase3a-local-synthesis",
+    )
+
+    response = orchestrator.handle(
+        "Can you verify who the current CEO of Microsoft is?"
+    )
+
+    assert response.status == "success"
+    assert calls
+    assert calls[-1]["provider_name"] == "local-synthesis"
+    assert (
+        calls[-1]["user_input"]
+        == (
+            "Synthesize the answer from the retrieved "
+            "evidence supplied in the system prompt."
+        )
+    )
+    assert "<retrieved_evidence>" in calls[-1]["system_prompt"]
+    assert response.data["retrieval_performed"] is True
+
+    print("OLLAMA DEFAULT NUM_PREDICT:", 256)
+    print("LOCAL RETRIEVAL SYNTHESIS ROUTED:", True)
+
+    return True
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -11898,6 +12490,26 @@ tests = [
     (
         "Real Retrieval Execution + Evidence Bridge",
         test_real_retrieval_evidence_bridge,
+    ),
+    (
+        "Phase 3A Retrieval Query Quality",
+        test_phase3a_retrieval_query_quality,
+    ),
+    (
+        "Phase 3A Functional Execution Runtime",
+        test_phase3a_functional_execution_runtime,
+    ),
+    (
+        "Phase 3A Orchestrator Execution Bridge",
+        test_phase3a_orchestrator_execution_bridge,
+    ),
+    (
+        "Phase 3A Fast Greeting + Failure Truth",
+        test_phase3a_fast_greeting_and_failure_truth,
+    ),
+    (
+        "Phase 3A Local Synthesis + Ollama Bound",
+        test_phase3a_local_synthesis_and_ollama_bound,
     ),
 ]
 

@@ -188,6 +188,11 @@ class OllamaProvider(ModelProvider):
                 max_tokens
             )
 
+        else:
+            # Functional Core default: bound local generation so
+            # short everyday turns cannot run unbounded.
+            options["num_predict"] = 256
+
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,

@@ -170,6 +170,7 @@ class ActionRequestDetector:
     )
 
     _FILESYSTEM_VERBS = (
+        "read",
         "delete",
         "move",
         "copy",

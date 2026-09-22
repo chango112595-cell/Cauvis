@@ -8084,3 +8084,43 @@ Strict Test 73 validates the full retrieval-to-synthesis path.
 ```text
 EXECUTION BRIDGE
 ```
+---
+
+# 2026-09-22 CHECKPOINT — PHASE 3A FUNCTIONAL CORE
+
+## Status
+
+**Phase 3A — Functional Core Upgrade: COMPLETE AND VALIDATED.**
+
+```text
+PASSED:  78
+FAILED:  0
+TOTAL:   78
+STATUS: ALL TESTS PASSED
+```
+
+## Functional Core Delivered
+
+- deterministic greeting fast path
+- bounded local Ollama generation
+- cleaned retrieval queries
+- relevance ranking and filtering
+- local-first retrieval synthesis
+- truthful provider failure reporting
+- chat-to-execution bridge
+- PermissionManager / ExecutionEngine / ToolRegistry integration
+- Windows app launch and URL opening
+- bounded file read/create/write
+- execution outcome verification
+- capability truth from bound executable handlers
+
+## Protected Operations
+
+filesystem delete, terminal execution, software installation,
+shutdown/restart, and system settings remain protected.
+
+## Exact Resume Point
+
+```text
+PHASE 3B — EXPANDED JARVIS BODY + VOICE I/O
+```

@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -14,6 +14,11 @@ from urllib.parse import (
     urlparse,
 )
 from urllib.request import Request, urlopen
+
+from intelligence.retrieval_query import (
+    RetrievalQueryPlan,
+    RetrievalQueryPlanner,
+)
 
 
 Transport = Callable[
@@ -46,6 +51,7 @@ class RetrievalResult:
     documents: list[RetrievalDocument] = field(default_factory=list)
     error: str | None = None
     elapsed_ms: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,17 +65,11 @@ class RetrievalResult:
             "source_count": len(self.documents),
             "error": self.error,
             "elapsed_ms": float(self.elapsed_ms),
+            "metadata": dict(self.metadata),
         }
 
 
 class _DuckDuckGoHTMLParser(HTMLParser):
-    """
-    Small parser for DuckDuckGo's HTML results page.
-
-    It deliberately extracts only result titles, result URLs,
-    and result snippets.
-    """
-
     def __init__(self):
         super().__init__()
         self.links: list[tuple[str, str]] = []
@@ -82,9 +82,7 @@ class _DuckDuckGoHTMLParser(HTMLParser):
     @staticmethod
     def _class_tokens(attrs) -> set[str]:
         values = dict(attrs)
-        return set(
-            str(values.get("class", "")).split()
-        )
+        return set(str(values.get("class", "")).split())
 
     def handle_starttag(self, tag, attrs):
         classes = self._class_tokens(attrs)
@@ -107,10 +105,7 @@ class _DuckDuckGoHTMLParser(HTMLParser):
             self._buffer.append(data)
 
     def handle_endtag(self, tag):
-        if self._mode is None:
-            return
-
-        if tag != self._tag:
+        if self._mode is None or tag != self._tag:
             return
 
         text = " ".join(
@@ -118,9 +113,7 @@ class _DuckDuckGoHTMLParser(HTMLParser):
         ).strip()
 
         if self._mode == "title":
-            self.links.append(
-                (self._href, text)
-            )
+            self.links.append((self._href, text))
 
         elif self._mode == "snippet":
             self.snippets.append(text)
@@ -133,24 +126,16 @@ class _DuckDuckGoHTMLParser(HTMLParser):
 
 class WebRetrievalRuntime:
     """
-    Read-only web retrieval runtime for Cauvis.
-
-    Primary provider:
-        DuckDuckGo HTML search.
-
-    Fallback:
-        Wikipedia search + introductory extracts.
-
-    This runtime performs retrieval only. It does not click,
-    submit forms, authenticate, purchase, upload, download,
-    or mutate remote websites.
+    Read-only retrieval runtime with deterministic query cleanup,
+    relevance filtering, and a Wikipedia fallback.
     """
 
     def __init__(
         self,
         timeout_seconds: float = 12.0,
-        max_results: int = 5,
+        max_results: int = 3,
         transport: Transport | None = None,
+        query_planner: RetrievalQueryPlanner | None = None,
     ):
         if timeout_seconds <= 0:
             raise ValueError(
@@ -164,30 +149,26 @@ class WebRetrievalRuntime:
 
         self.timeout_seconds = float(timeout_seconds)
         self.max_results = int(max_results)
-        self._transport = (
-            transport
-            or self._http_get_text
-        )
+        self._transport = transport or self._http_get_text
+        self.query_planner = query_planner or RetrievalQueryPlanner()
 
         self.last_attempted = False
         self.last_success = False
         self.last_error: str | None = None
         self.last_provider: str | None = None
         self.last_elapsed_ms: float | None = None
+        self.last_query_plan: RetrievalQueryPlan | None = None
 
     @property
     def available(self) -> bool:
         return bool(self.last_success)
 
-    def search(
-        self,
-        query: str,
-    ) -> RetrievalResult:
-        query = " ".join(
+    def search(self, query: str) -> RetrievalResult:
+        requested_query = " ".join(
             str(query).strip().split()
         )
 
-        if not query:
+        if not requested_query:
             return RetrievalResult(
                 query="",
                 success=False,
@@ -195,23 +176,43 @@ class WebRetrievalRuntime:
                 error="Retrieval query is empty.",
             )
 
+        plan = self.query_planner.plan(
+            requested_query
+        )
+
+        self.last_query_plan = plan
+
         started = time.perf_counter()
         self.last_attempted = True
 
         errors = []
 
-        for provider_name, handler in (
+        provider_calls = (
             (
                 "duckduckgo_html",
                 self._search_duckduckgo,
+                plan.search_query,
             ),
             (
                 "wikipedia",
                 self._search_wikipedia,
+                plan.wikipedia_query,
             ),
-        ):
+        )
+
+        for provider_name, handler, provider_query in provider_calls:
             try:
-                documents = handler(query)
+                raw_documents = handler(
+                    provider_query
+                )
+
+                documents = (
+                    self.query_planner.rank_documents(
+                        plan,
+                        raw_documents,
+                        max_results=self.max_results,
+                    )
+                )
 
                 if documents:
                     elapsed_ms = (
@@ -224,21 +225,26 @@ class WebRetrievalRuntime:
                     self.last_elapsed_ms = elapsed_ms
 
                     return RetrievalResult(
-                        query=query,
+                        query=provider_query,
                         success=True,
                         provider=provider_name,
-                        documents=documents[
-                            : self.max_results
-                        ],
+                        documents=documents,
                         elapsed_ms=round(
                             elapsed_ms,
                             3,
                         ),
+                        metadata={
+                            "query_plan": plan.to_dict(),
+                            "requested_query": requested_query,
+                            "provider_query": provider_query,
+                            "raw_result_count": len(raw_documents),
+                            "relevance_filtered": True,
+                        },
                     )
 
                 errors.append(
                     provider_name
-                    + ": no search results"
+                    + ": no relevant search results"
                 )
 
             except Exception as exc:
@@ -262,7 +268,7 @@ class WebRetrievalRuntime:
         self.last_elapsed_ms = elapsed_ms
 
         return RetrievalResult(
-            query=query,
+            query=plan.search_query,
             success=False,
             provider="none",
             documents=[],
@@ -271,6 +277,11 @@ class WebRetrievalRuntime:
                 elapsed_ms,
                 3,
             ),
+            metadata={
+                "query_plan": plan.to_dict(),
+                "requested_query": requested_query,
+                "relevance_filtered": True,
+            },
         )
 
     def _search_duckduckgo(
@@ -279,19 +290,14 @@ class WebRetrievalRuntime:
     ) -> list[RetrievalDocument]:
         url = (
             "https://html.duckduckgo.com/html/?"
-            + urlencode(
-                {
-                    "q": query,
-                }
-            )
+            + urlencode({"q": query})
         )
 
         status, body = self._transport(
             url,
             {
                 "User-Agent": (
-                    "Mozilla/5.0 Cauvis/1.0 "
-                    "read-only-retrieval"
+                    "Mozilla/5.0 Cauvis/1.0 read-only-retrieval"
                 ),
                 "Accept": "text/html,application/xhtml+xml",
             },
@@ -309,14 +315,9 @@ class WebRetrievalRuntime:
 
         documents = []
 
-        for index, (
-            href,
-            title,
-        ) in enumerate(parser.links):
-            normalized_url = (
-                self._normalize_duckduckgo_url(
-                    href
-                )
+        for index, (href, title) in enumerate(parser.links):
+            normalized_url = self._normalize_duckduckgo_url(
+                href
             )
 
             if not normalized_url:
@@ -330,19 +331,18 @@ class WebRetrievalRuntime:
 
             documents.append(
                 RetrievalDocument(
-                    title=(
-                        title
-                        or normalized_url
-                    ),
+                    title=title or normalized_url,
                     url=normalized_url,
-                    snippet=snippet,
-                    source_provider=(
-                        "duckduckgo_html"
-                    ),
+                    snippet=self._limit_snippet(snippet),
+                    source_provider="duckduckgo_html",
                 )
             )
 
-            if len(documents) >= self.max_results:
+            # Pull extra candidates so relevance ranking can discard junk.
+            if len(documents) >= max(
+                self.max_results * 4,
+                8,
+            ):
                 break
 
         return documents
@@ -351,6 +351,11 @@ class WebRetrievalRuntime:
         self,
         query: str,
     ) -> list[RetrievalDocument]:
+        search_limit = max(
+            self.max_results * 3,
+            6,
+        )
+
         search_url = (
             "https://en.wikipedia.org/w/api.php?"
             + urlencode(
@@ -358,7 +363,7 @@ class WebRetrievalRuntime:
                     "action": "query",
                     "list": "search",
                     "srsearch": query,
-                    "srlimit": self.max_results,
+                    "srlimit": search_limit,
                     "format": "json",
                     "utf8": 1,
                 }
@@ -368,9 +373,7 @@ class WebRetrievalRuntime:
         status, body = self._transport(
             search_url,
             {
-                "User-Agent": (
-                    "Cauvis/1.0 read-only-retrieval"
-                ),
+                "User-Agent": "Cauvis/1.0 read-only-retrieval",
                 "Accept": "application/json",
             },
             self.timeout_seconds,
@@ -383,6 +386,7 @@ class WebRetrievalRuntime:
             )
 
         payload = json.loads(body)
+
         results = (
             payload
             .get("query", {})
@@ -417,24 +421,16 @@ class WebRetrievalRuntime:
                 )
             )
 
-            extract_status, extract_body = (
-                self._transport(
-                    extract_url,
-                    {
-                        "User-Agent": (
-                            "Cauvis/1.0 "
-                            "read-only-retrieval"
-                        ),
-                        "Accept": "application/json",
-                    },
-                    self.timeout_seconds,
-                )
+            extract_status, extract_body = self._transport(
+                extract_url,
+                {
+                    "User-Agent": "Cauvis/1.0 read-only-retrieval",
+                    "Accept": "application/json",
+                },
+                self.timeout_seconds,
             )
 
-            if (
-                extract_status >= 200
-                and extract_status < 300
-            ):
+            if 200 <= extract_status < 300:
                 extract_payload = json.loads(
                     extract_body
                 )
@@ -447,10 +443,7 @@ class WebRetrievalRuntime:
 
                 for page in pages.values():
                     page_title = str(
-                        page.get(
-                            "title",
-                            "",
-                        )
+                        page.get("title", "")
                     ).strip()
 
                     extract = " ".join(
@@ -463,49 +456,31 @@ class WebRetrievalRuntime:
                     )
 
                     if page_title:
-                        extracts[
-                            page_title
-                        ] = extract
+                        extracts[page_title] = extract
 
         documents = []
 
         for item in results:
             title = str(
-                item.get(
-                    "title",
-                    "",
-                )
+                item.get("title", "")
             ).strip()
 
             if not title:
                 continue
 
-            raw_snippet = str(
-                item.get(
-                    "snippet",
-                    "",
-                )
-            )
-
-            search_snippet = (
-                self._strip_html(
-                    raw_snippet
+            search_snippet = self._strip_html(
+                str(
+                    item.get(
+                        "snippet",
+                        "",
+                    )
                 )
             )
 
             snippet = (
-                extracts.get(
-                    title,
-                    "",
-                )
+                extracts.get(title, "")
                 or search_snippet
             )
-
-            if len(snippet) > 1200:
-                snippet = (
-                    snippet[:1200].rstrip()
-                    + "..."
-                )
 
             documents.append(
                 RetrievalDocument(
@@ -513,22 +488,30 @@ class WebRetrievalRuntime:
                     url=(
                         "https://en.wikipedia.org/wiki/"
                         + quote(
-                            title.replace(
-                                " ",
-                                "_",
-                            ),
+                            title.replace(" ", "_"),
                             safe="()_-'",
                         )
                     ),
-                    snippet=snippet,
+                    snippet=self._limit_snippet(snippet),
                     source_provider="wikipedia",
                 )
             )
 
-            if len(documents) >= self.max_results:
-                break
-
         return documents
+
+    @staticmethod
+    def _limit_snippet(
+        snippet: str,
+        limit: int = 700,
+    ) -> str:
+        value = " ".join(
+            str(snippet).split()
+        )
+
+        if len(value) <= limit:
+            return value
+
+        return value[:limit].rstrip() + "..."
 
     @staticmethod
     def _normalize_duckduckgo_url(
@@ -552,18 +535,13 @@ class WebRetrievalRuntime:
                 query["uddg"][0]
             )
 
-        if parsed.scheme in {
-            "http",
-            "https",
-        }:
+        if parsed.scheme in {"http", "https"}:
             return href
 
         return ""
 
     @staticmethod
-    def _strip_html(
-        value: str,
-    ) -> str:
+    def _strip_html(value: str) -> str:
         value = re.sub(
             r"<[^>]+>",
             " ",
@@ -611,7 +589,6 @@ class WebRetrievalRuntime:
                 "utf-8",
                 errors="replace",
             )
-
             return int(exc.code), body
 
         except URLError as exc:

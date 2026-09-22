@@ -41,6 +41,11 @@ from intelligence.providers.openai_responses import (
 )
 from intelligence.router import AIModelRouter
 
+from execution.functional_runtime import (
+    FunctionalExecutionRuntime,
+    build_functional_execution_runtime,
+)
+
 
 class CauvisOrchestrator:
 
@@ -54,6 +59,7 @@ class CauvisOrchestrator:
         session_id: str = "local-session",
         factual_context_runtime: FactualContextRuntime | None = None,
         retrieval_runtime: WebRetrievalRuntime | None = None,
+        functional_execution_runtime: FunctionalExecutionRuntime | None = None,
     ):
         self.config = config
         self.state = CauvisState()
@@ -103,6 +109,15 @@ class CauvisOrchestrator:
             retrieval_runtime
         )
 
+        self.functional_execution_runtime = (
+            functional_execution_runtime
+        )
+        self.execution_engine = None
+        self.tool_registry = None
+        self.permission_manager = None
+        self.verification_engine = None
+        self.action_execution_bridge = None
+
         self.router: AIModelRouter | None = None
         self.brain: CauvisBrain | None = brain
 
@@ -112,6 +127,12 @@ class CauvisOrchestrator:
         elif self.enable_ai:
             self._initialize_beta_ai()
             self._initialize_retrieval_runtime()
+            self._initialize_execution_runtime()
+
+        if self.functional_execution_runtime is not None:
+            self._attach_functional_execution_runtime(
+                self.functional_execution_runtime
+            )
 
         self.verified_capability_builder = (
             VerifiedCapabilityBuilder()
@@ -417,6 +438,99 @@ class CauvisOrchestrator:
         return value
 
 
+    def _handle_deterministic_greeting(
+        self,
+        user_input: str,
+        intent,
+        *,
+        turn_started: float,
+    ) -> CauvisResponse | None:
+        normalized = (
+            RoutingLanguageNormalizer.normalize(
+                user_input
+            )
+            .rstrip(" ?.!,;:")
+        )
+
+        greetings = {
+            "hi",
+            "hello",
+            "hey",
+            "hi cauvis",
+            "hello cauvis",
+            "hey cauvis",
+            "good morning",
+            "good morning cauvis",
+            "good afternoon",
+            "good afternoon cauvis",
+            "good evening",
+            "good evening cauvis",
+            "hola",
+            "hola cauvis",
+        }
+
+        if normalized not in greetings:
+            return None
+
+        language = (
+            RoutingLanguageNormalizer.language_hint(
+                user_input
+            )
+        )
+
+        message = (
+            "¡Hola! Soy Cauvis. ¿En qué puedo ayudarte?"
+            if language == "es"
+            else "Hello! I'm Cauvis. What can I help you with?"
+        )
+
+        self.conversation.append(
+            self.session_id,
+            "user",
+            user_input,
+        )
+        self.conversation.append(
+            self.session_id,
+            "assistant",
+            message,
+        )
+
+        telemetry = self._build_turn_telemetry(
+            turn_started=turn_started,
+            guard_ms=0.0,
+            context_ms=0.0,
+            brain_model_ms=0.0,
+            postprocess_ms=0.0,
+            path="deterministic_greeting",
+            model_called=False,
+            deterministic_guard="greeting",
+        )
+
+        return CauvisResponse(
+            status="success",
+            message=message,
+            intent=intent.name,
+            confidence=intent.confidence,
+            data={
+                "input": user_input,
+                "ai_enabled": True,
+                "ai_success": True,
+                "session_id": self.session_id,
+                "conversation_turns": (
+                    self.conversation.turn_count(
+                        self.session_id
+                    )
+                ),
+                "model_called": False,
+                "metadata": {
+                    "deterministic_greeting": True,
+                },
+                "evidence": [],
+                "telemetry": telemetry,
+            },
+        )
+
+
     def _guard_external_action_request(
         self,
         user_input: str,
@@ -475,6 +589,12 @@ class CauvisOrchestrator:
                 retrieval_runtime=(
                     self.retrieval_runtime
                 ),
+                execution_engine=(
+                    self.execution_engine
+                ),
+                tool_registry=(
+                    self.tool_registry
+                ),
             )
         )
 
@@ -495,6 +615,82 @@ class CauvisOrchestrator:
             if capability is not None
             else "not_verified"
         )
+
+        if (
+            capability_available
+            and self.action_execution_bridge is not None
+            and self.action_execution_bridge.can_handle(
+                action_request
+            )
+        ):
+            execution_result = (
+                self.action_execution_bridge.execute(
+                    str(action_entry["text"]),
+                    action_request,
+                    explicit_user_request=True,
+                )
+            )
+
+            return CauvisResponse(
+                status=execution_result.status,
+                message=execution_result.message,
+                intent=intent.name,
+                confidence=intent.confidence,
+                data={
+                    "input": user_input,
+                    "action_requested": True,
+                    "action_category": action_request.category,
+                    "action": action_request.action,
+                    "required_capability": (
+                        action_request.required_capability
+                    ),
+                    "capability_status": capability_status,
+                    "capability_available": capability_available,
+                    "action_performed": (
+                        execution_result.action_performed
+                    ),
+                    "execution_attempted": (
+                        execution_result.execution_attempted
+                    ),
+                    "model_called": False,
+                    "tool_name": execution_result.tool_name,
+                    "permission_action": (
+                        execution_result.permission_action
+                    ),
+                    "permission_level": (
+                        execution_result.permission_level
+                    ),
+                    "approval_from_current_request": (
+                        execution_result
+                        .approval_from_current_request
+                    ),
+                    "verification_status": (
+                        execution_result.verification_status
+                    ),
+                    "verification_success": (
+                        execution_result.verification_success
+                    ),
+                    "execution_output": execution_result.output,
+                    "execution_error": execution_result.error,
+                    "execution_metadata": dict(
+                        execution_result.metadata
+                    ),
+                    "block_reason": (
+                        None
+                        if execution_result.success
+                        else execution_result.error
+                    ),
+                    "request_segment_count": len(analyses),
+                    "request_segments": (
+                        self._request_segment_texts(
+                            analyses
+                        )
+                    ),
+                    "executed_segment": str(
+                        action_entry["text"]
+                    ),
+                },
+            )
 
         # Even if a future runtime snapshot says the capability
         # itself is available, this Beta conversation path still
@@ -887,6 +1083,12 @@ class CauvisOrchestrator:
                 retrieval_runtime=(
                     self.retrieval_runtime
                 ),
+                execution_engine=(
+                    self.execution_engine
+                ),
+                tool_registry=(
+                    self.tool_registry
+                ),
             )
         )
 
@@ -1054,6 +1256,91 @@ class CauvisOrchestrator:
                 "blocked_segment": str(verification_entry["text"]),
             },
         )
+
+
+    def _select_local_synthesis_provider_name(
+        self,
+    ) -> str | None:
+        if self.router is None:
+            return None
+
+        ranks = {
+            "available": 0,
+            "unknown": 1,
+            "degraded": 2,
+        }
+
+        candidates = []
+
+        for index, provider_name in enumerate(
+            self.router.list_providers()
+        ):
+            provider = self.router.get_provider(
+                provider_name
+            )
+
+            if provider is None:
+                continue
+
+            provider_types = set(
+                getattr(
+                    provider,
+                    "provider_types",
+                    set(),
+                )
+            )
+
+            if "local" not in provider_types:
+                continue
+
+            configuration = (
+                self.router.get_provider_configuration(
+                    provider_name
+                )
+            )
+
+            if not (
+                configuration is not None
+                and configuration.enabled
+                and configuration.configured
+            ):
+                continue
+
+            health = (
+                self.router.provider_runtime.get_health(
+                    provider_name
+                )
+            )
+
+            if health is None:
+                continue
+
+            rank = ranks.get(
+                health.status.value
+            )
+
+            if rank is None:
+                continue
+
+            candidates.append(
+                (
+                    rank,
+                    index,
+                    provider_name,
+                )
+            )
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
+            )
+        )
+
+        return candidates[0][2]
 
 
     def _select_current_ai_provider(
@@ -1319,6 +1606,12 @@ class CauvisOrchestrator:
                 ),
                 retrieval_runtime=(
                     self.retrieval_runtime
+                ),
+                execution_engine=(
+                    self.execution_engine
+                ),
+                tool_registry=(
+                    self.tool_registry
                 ),
             )
         )
@@ -1658,6 +1951,12 @@ class CauvisOrchestrator:
                 ),
                 retrieval_runtime=(
                     self.retrieval_runtime
+                ),
+                execution_engine=(
+                    self.execution_engine
+                ),
+                tool_registry=(
+                    self.tool_registry
                 ),
             )
         )
@@ -2316,6 +2615,27 @@ class CauvisOrchestrator:
         }
 
 
+    def _initialize_execution_runtime(
+        self,
+    ) -> None:
+        if self.functional_execution_runtime is None:
+            self.functional_execution_runtime = (
+                build_functional_execution_runtime(
+                    project_root=self.config.root_dir
+                )
+            )
+
+    def _attach_functional_execution_runtime(
+        self,
+        runtime: FunctionalExecutionRuntime,
+    ) -> None:
+        self.functional_execution_runtime = runtime
+        self.execution_engine = runtime.execution_engine
+        self.tool_registry = runtime.tool_registry
+        self.permission_manager = runtime.permission_manager
+        self.verification_engine = runtime.verification_engine
+        self.action_execution_bridge = runtime.action_bridge
+
     def _initialize_retrieval_runtime(
         self,
     ) -> None:
@@ -2332,7 +2652,7 @@ class CauvisOrchestrator:
         max_results_value = str(
             self.environment.get(
                 "CAUVIS_RETRIEVAL_MAX_RESULTS",
-                "5",
+                "3",
             )
         ).strip()
 
@@ -2348,7 +2668,7 @@ class CauvisOrchestrator:
                 max_results_value
             )
         except ValueError:
-            max_results = 5
+            max_results = 3
 
         self.retrieval_runtime = (
             WebRetrievalRuntime(
@@ -2507,6 +2827,17 @@ class CauvisOrchestrator:
                 },
             )
 
+        greeting_response = (
+            self._handle_deterministic_greeting(
+                user_input,
+                intent,
+                turn_started=turn_started,
+            )
+        )
+
+        if greeting_response is not None:
+            return greeting_response
+
         # -----------------------------------------------------
         # Deterministic external-action truth boundary
         # -----------------------------------------------------
@@ -2530,6 +2861,13 @@ class CauvisOrchestrator:
                 guard_started
             )
 
+            execution_success = bool(
+                action_guard_response.status == "success"
+                and action_guard_response.data.get(
+                    "action_performed"
+                )
+            )
+
             action_guard_response.data[
                 "telemetry"
             ] = self._build_turn_telemetry(
@@ -2538,10 +2876,16 @@ class CauvisOrchestrator:
                 context_ms=0.0,
                 brain_model_ms=0.0,
                 postprocess_ms=0.0,
-                path="blocked",
+                path=(
+                    "execution_success"
+                    if execution_success
+                    else "blocked"
+                ),
                 model_called=False,
                 deterministic_guard=(
-                    "external_action"
+                    "external_action_execution"
+                    if execution_success
+                    else "external_action"
                 ),
             )
 
@@ -2779,9 +3123,16 @@ class CauvisOrchestrator:
         brain_started = time.perf_counter()
 
         try:
+            synthesis_provider_name = (
+                self._select_local_synthesis_provider_name()
+                if retrieval_results_for_turn
+                else None
+            )
+
             model_response = self.brain.think(
                 model_input_for_brain,
                 system_prompt=turn_system_prompt,
+                provider_name=synthesis_provider_name,
             )
 
             model_response.metadata.setdefault(
@@ -2818,6 +3169,11 @@ class CauvisOrchestrator:
             model_response.metadata.setdefault(
                 "retrieval_grounding_included",
                 bool(retrieval_context),
+            )
+
+            model_response.metadata.setdefault(
+                "retrieval_synthesis_provider",
+                synthesis_provider_name,
             )
 
             model_response.metadata.setdefault(
@@ -3012,14 +3368,13 @@ class CauvisOrchestrator:
             )
 
         if (
-            configuration is not None
+            model_response.provider == "openai"
+            and configuration is not None
             and not configuration.configured
         ):
             message = (
-                "Cauvis beta is online, but the OpenAI "
-                "provider is not configured. Set "
-                "OPENAI_API_KEY in the environment and "
-                "restart Cauvis."
+                "Cauvis could not use the explicitly selected "
+                "OpenAI provider because it is not configured."
             )
 
             status = "configuration_required"
