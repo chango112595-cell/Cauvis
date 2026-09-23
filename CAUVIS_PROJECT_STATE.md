@@ -412,7 +412,7 @@ Current default classifications:
 
 ### APPROVAL_REQUIRED
 
-- `aapplication.launch`
+- `application.launch`
 - `filesystem.write`
 - `filesystem.copy`
 - `filesystem.move`
