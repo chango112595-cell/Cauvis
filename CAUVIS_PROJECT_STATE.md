@@ -412,7 +412,7 @@ Current default classifications:
 
 ### APPROVAL_REQUIRED
 
-- `application.launch`
+- `aapplication.launch`
 - `filesystem.write`
 - `filesystem.copy`
 - `filesystem.move`
@@ -8124,3 +8124,179 @@ shutdown/restart, and system settings remain protected.
 ```text
 PHASE 3B — EXPANDED JARVIS BODY + VOICE I/O
 ```
+
+---
+
+# 2026-09-22 CHECKPOINT — PHASE 3B REAL-WORLD USABILITY
+
+## Status
+
+**Phase 3B — Clarification, Windows Awareness, Multi-Action, and PC Diagnostics: COMPLETE AND VALIDATED.**
+
+```text
+PASSED:  84
+FAILED:  0
+TOTAL:   84
+STATUS: ALL TESTS PASSED
+```
+
+## Core Behavior Upgrade
+
+Cauvis now uses a clarification-first action flow:
+
+```text
+request
+ ↓
+normalize wake-name / safe command typos
+ ↓
+understand action + parameters
+ ↓
+can missing detail be resolved from Windows/runtime?
+ ├─ yes → resolve automatically
+ └─ no  → ask focused clarification
+             ↓
+          preserve pending action
+             ↓
+          user answers
+             ↓
+          resume original action
+             ↓
+          permission check
+             ↓
+          execute
+             ↓
+          verify
+```
+
+## Wake-Name Normalization
+
+Commands such as:
+
+```text
+Cauvis, open Chrome
+Hey Cauvis open Notepad
+Cauvis I need you to search the web for motorcycles
+```
+
+are routed as commands without altering the original conversation text.
+
+A small safe typo map covers command words such as:
+
+```text
+calle -> called
+tect -> text
+opne -> open
+serach -> search
+```
+
+User content itself is not broadly autocorrected.
+
+## Windows Known Folders
+
+Cauvis no longer assumes:
+
+```text
+C:\Users\<name>\Desktop
+```
+
+It resolves Desktop, Documents, and Downloads from Windows User Shell
+Folders and falls back to existing profile/OneDrive paths.
+
+## Clarification + Pending Actions
+
+Incomplete file actions no longer fall into generic AI chat.
+
+Example:
+
+```text
+User: Create report.txt with text hello
+Cauvis: Where should I save it?
+User: Desktop
+Cauvis: [resumes original action, resolves real Desktop, writes, verifies]
+```
+
+Existing files require an explicit overwrite/replace response.
+
+## Multi-Action Browser Commands
+
+Cauvis can execute multiple URLs in one command:
+
+```text
+open python.org and facebook.com
+```
+
+Each URL is independently sent through the bound browser tool.
+
+## Real PC Diagnostics
+
+Cauvis has a bounded read-only Windows performance diagnostic tool.
+
+It collects:
+
+```text
+Windows version
+CPU load
+memory usage
+disk capacity/free space
+last boot time
+top memory processes
+```
+
+and produces deterministic findings from the real runtime snapshot.
+
+It does not modify system settings or terminate processes.
+
+## Retrieval Routing
+
+Wake-name/polite wrappers are removed before factual/retrieval
+classification, so:
+
+```text
+Cauvis I need you to search the web for anything related to motorcycles
+```
+
+routes to real retrieval instead of generic model chat.
+
+## Protected Boundaries
+
+Still protected:
+
+```text
+filesystem delete
+arbitrary terminal execution
+software installation
+system shutdown/restart
+system settings
+```
+
+## Exact Resume Point
+
+Next major milestone:
+
+```text
+PHASE 3C — FAST MODEL ROUTING + CHANGO VOICE FOUNDATION
+```
+
+Priorities:
+
+```text
+1. reduce local-generation latency
+2. optional fast local model for everyday chat
+3. stronger model for complex work
+4. STT / TTS
+5. VAD
+6. wake word
+7. interruption / anti-self-listening
+```
+## Phase 3B Final Validation Addendum
+
+Final automated validation: **84 / 84 PASS**.
+
+Final live validation: **PHASE 3B LIVE USABILITY SMOKE: PASS**.
+
+Compatibility repairs completed before publication:
+
+- Single system actions now preserve the original ActionExecutionResult and canonical tool identity such as application.launch; Phase 3B multi-action aggregation remains enabled for 2+ actions.
+- Sandboxed runtimes now keep Desktop, Documents, and Downloads inside the explicitly injected filesystem home; normal Cauvis runtime continues resolving real Windows / OneDrive known folders.
+- Filesystem security boundaries were not weakened.
+- Phase 3A execution compatibility remains preserved.

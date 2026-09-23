@@ -1,13 +1,16 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 from pathlib import Path
 
 from capabilities.registry import Capability, CapabilityRegistry
 from execution.action_bridge import ActionExecutionBridge
 from execution.engine import ExecutionEngine
+from execution.pending_actions import PendingActionManager
 from security.permissions import PermissionManager
 from tools.filesystem_actions import FilesystemActionRuntime
 from tools.registry import Tool, ToolRegistry
+from tools.system_diagnostics import SystemDiagnosticsRuntime
 from tools.windows_actions import WindowsActionRuntime
+from tools.windows_known_folders import WindowsKnownFolderResolver
 from verification.verifier import VerificationEngine
 
 
@@ -21,6 +24,9 @@ class FunctionalExecutionRuntime:
     action_bridge: ActionExecutionBridge
     windows_runtime: WindowsActionRuntime
     filesystem_runtime: FilesystemActionRuntime
+    known_folders: WindowsKnownFolderResolver
+    diagnostics_runtime: SystemDiagnosticsRuntime
+    pending_actions: PendingActionManager
 
 
 def build_functional_execution_runtime(
@@ -28,6 +34,9 @@ def build_functional_execution_runtime(
     project_root: str | Path,
     windows_runtime: WindowsActionRuntime | None = None,
     filesystem_runtime: FilesystemActionRuntime | None = None,
+    known_folders: WindowsKnownFolderResolver | None = None,
+    diagnostics_runtime: SystemDiagnosticsRuntime | None = None,
+    pending_actions: PendingActionManager | None = None,
 ) -> FunctionalExecutionRuntime:
     root = Path(project_root).resolve()
 
@@ -37,8 +46,65 @@ def build_functional_execution_runtime(
     verifier = VerificationEngine()
 
     windows = windows_runtime or WindowsActionRuntime()
-    filesystem = filesystem_runtime or FilesystemActionRuntime(
-        project_root=root
+
+    filesystem = (
+        filesystem_runtime
+        or FilesystemActionRuntime(
+            project_root=root
+        )
+    )
+
+    if known_folders is not None:
+        folders = known_folders
+
+    elif filesystem.home != Path.home().resolve():
+        sandbox_home = filesystem.home
+
+        def sandbox_known_folder(name: str) -> Path:
+            direct = (
+                sandbox_home / name
+            ).resolve(strict=False)
+
+            onedrive = (
+                sandbox_home / "OneDrive" / name
+            ).resolve(strict=False)
+
+            if direct.is_dir():
+                return direct
+
+            if onedrive.is_dir():
+                return onedrive
+
+            return direct
+
+        folders = WindowsKnownFolderResolver(
+            home=sandbox_home,
+            overrides={
+                "desktop": sandbox_known_folder(
+                    "Desktop"
+                ),
+                "documents": sandbox_known_folder(
+                    "Documents"
+                ),
+                "downloads": sandbox_known_folder(
+                    "Downloads"
+                ),
+            },
+        )
+
+    else:
+        folders = WindowsKnownFolderResolver(
+            home=filesystem.home
+        )
+
+    diagnostics = (
+        diagnostics_runtime
+        or SystemDiagnosticsRuntime()
+    )
+
+    pending = (
+        pending_actions
+        or PendingActionManager()
     )
 
     for name, description, category in (
@@ -49,7 +115,7 @@ def build_functional_execution_runtime(
         ),
         (
             "system_actions",
-            "Known application launching and bounded system actions.",
+            "Known application launching and read-only system diagnostics.",
             "system",
         ),
         (
@@ -59,7 +125,7 @@ def build_functional_execution_runtime(
         ),
         (
             "web_actions",
-            "Open a URL through a bound browser handler.",
+            "Open one or more URLs through a bound browser handler.",
             "web",
         ),
     ):
@@ -82,7 +148,7 @@ def build_functional_execution_runtime(
             handler=windows.launch_application,
             metadata={
                 "permission_action": "application.launch",
-                "functional_core": True,
+                "phase": "3B",
             },
         )
     )
@@ -99,7 +165,7 @@ def build_functional_execution_runtime(
             handler=windows.open_url,
             metadata={
                 "permission_action": "web.open_url",
-                "functional_core": True,
+                "phase": "3B",
             },
         )
     )
@@ -115,7 +181,7 @@ def build_functional_execution_runtime(
             handler=filesystem.read_text,
             metadata={
                 "permission_action": "filesystem.read",
-                "functional_core": True,
+                "phase": "3B",
             },
         )
     )
@@ -131,7 +197,27 @@ def build_functional_execution_runtime(
             handler=filesystem.write_text,
             metadata={
                 "permission_action": "filesystem.write",
-                "functional_core": True,
+                "phase": "3B",
+            },
+        )
+    )
+
+    tools.register(
+        Tool(
+            name="system.performance_snapshot",
+            description=(
+                "Collect a read-only Windows CPU, memory, disk, uptime, "
+                "and process snapshot."
+            ),
+            capabilities={
+                "execution_actions",
+                "system_actions",
+            },
+            handler=diagnostics.performance_snapshot,
+            metadata={
+                "permission_action": "system.info",
+                "phase": "3B",
+                "read_only": True,
             },
         )
     )
@@ -148,6 +234,8 @@ def build_functional_execution_runtime(
         permission_manager=permissions,
         project_root=root,
         home=filesystem.home,
+        known_folders=folders,
+        pending_actions=pending,
     )
 
     return FunctionalExecutionRuntime(
@@ -159,4 +247,7 @@ def build_functional_execution_runtime(
         action_bridge=bridge,
         windows_runtime=windows,
         filesystem_runtime=filesystem,
+        known_folders=folders,
+        diagnostics_runtime=diagnostics,
+        pending_actions=pending,
     )

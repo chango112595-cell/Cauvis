@@ -13,6 +13,7 @@ from core.response import CauvisResponse
 from core.action_request import ActionRequestDetector
 from core.request_segments import RequestSegmenter
 from core.routing_language import RoutingLanguageNormalizer
+from core.command_normalizer import CommandNormalizer
 
 from intelligence.brain import CauvisBrain
 from intelligence.factual_boundary import (
@@ -195,17 +196,21 @@ class CauvisOrchestrator:
         analyses = []
 
         for segment in segments:
-            factual = self.factual_boundary_classifier.classify(
+            routing_text = CommandNormalizer.routing_text(
                 segment.text
             )
 
+            factual = self.factual_boundary_classifier.classify(
+                routing_text
+            )
+
             action = self.action_request_detector.detect(
-                segment.text
+                routing_text
             )
 
             uncertainty = (
                 self.factual_uncertainty_classifier.classify(
-                    segment.text
+                    routing_text
                 )
             )
 
@@ -221,6 +226,7 @@ class CauvisOrchestrator:
                 {
                     "index": segment.index,
                     "text": segment.text,
+                    "routing_text": routing_text,
                     "factual": factual,
                     "action": action,
                     "uncertainty": uncertainty,
@@ -438,6 +444,76 @@ class CauvisOrchestrator:
         return value
 
 
+    def _handle_pending_action_response(
+        self,
+        user_input: str,
+        intent,
+        *,
+        turn_started: float,
+    ) -> CauvisResponse | None:
+        if self.action_execution_bridge is None:
+            return None
+
+        execution_result = (
+            self.action_execution_bridge.resume_pending(
+                self.session_id,
+                user_input,
+            )
+        )
+
+        if execution_result is None:
+            return None
+
+        path = (
+            "clarification_required"
+            if execution_result.status
+            == "clarification_required"
+            else (
+                "execution_success"
+                if execution_result.success
+                else "execution_failure"
+            )
+        )
+
+        telemetry = self._build_turn_telemetry(
+            turn_started=turn_started,
+            guard_ms=0.0,
+            context_ms=0.0,
+            brain_model_ms=0.0,
+            postprocess_ms=0.0,
+            path=path,
+            model_called=False,
+            deterministic_guard="pending_action",
+        )
+
+        return CauvisResponse(
+            status=execution_result.status,
+            message=execution_result.message,
+            intent=intent.name,
+            confidence=intent.confidence,
+            data={
+                "input": user_input,
+                "pending_action_handled": True,
+                "action_performed": execution_result.action_performed,
+                "execution_attempted": execution_result.execution_attempted,
+                "model_called": False,
+                "tool_name": execution_result.tool_name,
+                "verification_status": (
+                    execution_result.verification_status
+                ),
+                "verification_success": (
+                    execution_result.verification_success
+                ),
+                "execution_output": execution_result.output,
+                "execution_error": execution_result.error,
+                "execution_metadata": dict(
+                    execution_result.metadata
+                ),
+                "telemetry": telemetry,
+            },
+        )
+
+
     def _handle_deterministic_greeting(
         self,
         user_input: str,
@@ -628,6 +704,7 @@ class CauvisOrchestrator:
                     str(action_entry["text"]),
                     action_request,
                     explicit_user_request=True,
+                    session_id=self.session_id,
                 )
             )
 
@@ -819,7 +896,12 @@ class CauvisOrchestrator:
 
             item["retrieval_result"] = (
                 self.retrieval_runtime.search(
-                    str(item["text"])
+                    str(
+                        item.get(
+                            "routing_text",
+                            item["text"],
+                        )
+                    )
                 )
             )
 
@@ -2827,6 +2909,17 @@ class CauvisOrchestrator:
                 },
             )
 
+        pending_response = (
+            self._handle_pending_action_response(
+                user_input,
+                intent,
+                turn_started=turn_started,
+            )
+        )
+
+        if pending_response is not None:
+            return pending_response
+
         greeting_response = (
             self._handle_deterministic_greeting(
                 user_input,
@@ -2868,6 +2961,11 @@ class CauvisOrchestrator:
                 )
             )
 
+            clarification_required = bool(
+                action_guard_response.status
+                == "clarification_required"
+            )
+
             action_guard_response.data[
                 "telemetry"
             ] = self._build_turn_telemetry(
@@ -2877,15 +2975,23 @@ class CauvisOrchestrator:
                 brain_model_ms=0.0,
                 postprocess_ms=0.0,
                 path=(
-                    "execution_success"
-                    if execution_success
-                    else "blocked"
+                    "clarification_required"
+                    if clarification_required
+                    else (
+                        "execution_success"
+                        if execution_success
+                        else "blocked"
+                    )
                 ),
                 model_called=False,
                 deterministic_guard=(
-                    "external_action_execution"
-                    if execution_success
-                    else "external_action"
+                    "external_action_clarification"
+                    if clarification_required
+                    else (
+                        "external_action_execution"
+                        if execution_success
+                        else "external_action"
+                    )
                 ),
             )
 

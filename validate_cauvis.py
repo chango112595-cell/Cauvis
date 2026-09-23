@@ -12276,6 +12276,478 @@ def test_phase3a_local_synthesis_and_ollama_bound():
 
     return True
 
+
+# ============================================================
+# TEST 79 - PHASE 3B COMMAND NORMALIZATION
+# ============================================================
+
+def test_phase3b_command_normalization():
+    from core.action_request import ActionRequestDetector
+    from core.command_normalizer import CommandNormalizer
+
+    cases = {
+        "Cauvis, open Chrome": "open Chrome",
+        "hey Cauvis open notepad": "open notepad",
+        "cauvis I need you to search the web for motorcycles": (
+            "search the web for motorcycles"
+        ),
+        "cauvis create a text file calle test.txt with tect hello": (
+            "create a text file called test.txt with text hello"
+        ),
+    }
+
+    for source, expected in cases.items():
+        actual = CommandNormalizer.routing_text(source)
+        assert actual.lower() == expected.lower(), (source, actual)
+
+    detector = ActionRequestDetector()
+
+    assert detector.detect(
+        "Cauvis, open Chrome"
+    ).requested is True
+
+    typo = detector.detect(
+        "cauvis create a text file calle test.txt with tect hello"
+    )
+
+    assert typo.requested is True
+    assert typo.category == "filesystem"
+
+    print("WAKE-NAME PREFIX NORMALIZED:", True)
+    print("SAFE COMMAND TYPO NORMALIZATION:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 80 - PHASE 3B WINDOWS KNOWN FOLDERS
+# ============================================================
+
+def test_phase3b_windows_known_folders():
+    from pathlib import Path
+    import tempfile
+
+    from tools.windows_known_folders import (
+        WindowsKnownFolderResolver,
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        desktop = root / "OneDrive" / "Desktop"
+        documents = root / "Documents"
+        downloads = root / "Downloads"
+
+        for item in (desktop, documents, downloads):
+            item.mkdir(parents=True)
+
+        resolver = WindowsKnownFolderResolver(
+            home=root,
+            overrides={
+                "desktop": desktop,
+                "documents": documents,
+                "downloads": downloads,
+            },
+        )
+
+        assert resolver.resolve("desktop") == desktop.resolve()
+        assert resolver.resolve("documents") == documents.resolve()
+        assert resolver.resolve("downloads") == downloads.resolve()
+
+    print("DESKTOP RESOLUTION:", True)
+    print("DOCUMENTS RESOLUTION:", True)
+    print("DOWNLOADS RESOLUTION:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 81 - PHASE 3B CLARIFICATION + PENDING ACTION
+# ============================================================
+
+def test_phase3b_clarification_pending_action():
+    from pathlib import Path
+    import tempfile
+
+    from core.action_request import ActionRequestDetector
+    from execution.functional_runtime import (
+        build_functional_execution_runtime,
+    )
+    from tools.filesystem_actions import FilesystemActionRuntime
+    from tools.windows_actions import WindowsActionRuntime
+    from tools.windows_known_folders import (
+        WindowsKnownFolderResolver,
+    )
+
+    class FakeProcess:
+        pid = 1
+
+        @staticmethod
+        def poll():
+            return None
+
+    with tempfile.TemporaryDirectory() as temporary:
+        home = Path(temporary) / "home"
+        project = home / "Cauvis"
+        desktop = home / "OneDrive" / "Desktop"
+
+        project.mkdir(parents=True)
+        desktop.mkdir(parents=True)
+
+        folders = WindowsKnownFolderResolver(
+            home=home,
+            overrides={
+                "desktop": desktop,
+            },
+        )
+
+        runtime = build_functional_execution_runtime(
+            project_root=project,
+            windows_runtime=WindowsActionRuntime(
+                launcher=lambda command: FakeProcess(),
+                browser_opener=lambda url: True,
+                environment={},
+            ),
+            filesystem_runtime=FilesystemActionRuntime(
+                project_root=project,
+                home=home,
+            ),
+            known_folders=folders,
+        )
+
+        detector = ActionRequestDetector()
+
+        request = (
+            "Cauvis create a text file called test.txt "
+            "with text hello from pending"
+        )
+
+        first = runtime.action_bridge.execute(
+            request,
+            detector.detect(request),
+            explicit_user_request=True,
+            session_id="pending-test",
+        )
+
+        assert first.status == "clarification_required"
+        assert runtime.pending_actions.has("pending-test") is True
+        assert "where" in first.message.lower()
+
+        second = runtime.action_bridge.resume_pending(
+            "pending-test",
+            "Desktop",
+        )
+
+        assert second is not None
+        assert second.status == "success"
+        assert second.verification_success is True
+
+        target = desktop / "test.txt"
+
+        assert target.is_file()
+        assert target.read_text(
+            encoding="utf-8"
+        ) == "hello from pending"
+
+        assert runtime.pending_actions.has("pending-test") is False
+
+    print("CLARIFICATION REQUESTED:", True)
+    print("PENDING ACTION RESUMED:", True)
+    print("RESOLVED DESKTOP WRITE VERIFIED:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 82 - PHASE 3B MULTI-ACTION URL EXECUTION
+# ============================================================
+
+def test_phase3b_multi_action_urls():
+    from pathlib import Path
+    import tempfile
+
+    from core.action_request import ActionRequestDetector
+    from execution.functional_runtime import (
+        build_functional_execution_runtime,
+    )
+    from tools.filesystem_actions import FilesystemActionRuntime
+    from tools.windows_actions import WindowsActionRuntime
+
+    opened = []
+
+    class FakeProcess:
+        pid = 2
+
+        @staticmethod
+        def poll():
+            return None
+
+    with tempfile.TemporaryDirectory() as temporary:
+        home = Path(temporary) / "home"
+        project = home / "Cauvis"
+        project.mkdir(parents=True)
+
+        runtime = build_functional_execution_runtime(
+            project_root=project,
+            windows_runtime=WindowsActionRuntime(
+                launcher=lambda command: FakeProcess(),
+                browser_opener=lambda url: (
+                    opened.append(url) or True
+                ),
+                environment={},
+            ),
+            filesystem_runtime=FilesystemActionRuntime(
+                project_root=project,
+                home=home,
+            ),
+        )
+
+        detector = ActionRequestDetector()
+
+        text = "open python.org and facebook.com"
+
+        result = runtime.action_bridge.execute(
+            text,
+            detector.detect(text),
+            explicit_user_request=True,
+            session_id="multi-url",
+        )
+
+        assert result.status == "success"
+        assert result.metadata["batch_action_count"] == 2
+        assert opened == [
+            "https://python.org",
+            "https://facebook.com",
+        ]
+
+    print("MULTI URL COUNT:", 2)
+    print("SEQUENTIAL URL EXECUTION:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 83 - PHASE 3B REAL SYSTEM DIAGNOSTIC TOOL
+# ============================================================
+
+def test_phase3b_system_diagnostics():
+    from pathlib import Path
+    import tempfile
+
+    from core.action_request import ActionRequestDetector
+    from execution.functional_runtime import (
+        build_functional_execution_runtime,
+    )
+    from tools.filesystem_actions import FilesystemActionRuntime
+    from tools.system_diagnostics import SystemDiagnosticsRuntime
+    from tools.windows_actions import WindowsActionRuntime
+
+    sample = {
+        "cpu_percent": 88.0,
+        "memory_percent": 82.0,
+        "memory_total_gb": 16.0,
+        "memory_free_gb": 2.8,
+        "disks": [
+            {
+                "drive": "C:",
+                "free_gb": 30.0,
+                "free_percent": 6.0,
+            }
+        ],
+        "top_memory_processes": [
+            {
+                "name": "example",
+                "pid": 123,
+                "memory_mb": 1400,
+            }
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as temporary:
+        home = Path(temporary) / "home"
+        project = home / "Cauvis"
+        project.mkdir(parents=True)
+
+        runtime = build_functional_execution_runtime(
+            project_root=project,
+            windows_runtime=WindowsActionRuntime(
+                launcher=lambda command: None,
+                browser_opener=lambda url: True,
+                environment={},
+            ),
+            filesystem_runtime=FilesystemActionRuntime(
+                project_root=project,
+                home=home,
+            ),
+            diagnostics_runtime=SystemDiagnosticsRuntime(
+                collector=lambda: sample
+            ),
+        )
+
+        detector = ActionRequestDetector()
+
+        text = (
+            "Cauvis I want you to analyze my pc "
+            "and tell me why it is running slow"
+        )
+
+        action = detector.detect(text)
+
+        assert action.requested is True
+        assert action.category == "system"
+        assert action.action == "diagnose"
+
+        result = runtime.action_bridge.execute(
+            text,
+            action,
+            explicit_user_request=True,
+            session_id="diagnostics",
+        )
+
+        assert result.status == "success"
+        assert result.verification_success is True
+
+        lower = result.message.lower()
+
+        assert "cpu" in lower
+        assert "memory" in lower
+        assert "low free space" in lower or "disk" in lower
+
+    print("REAL METRIC PATH:", True)
+    print("DETERMINISTIC BOTTLENECK FINDINGS:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 84 - PHASE 3B ORCHESTRATOR PENDING + WAKE RETRIEVAL
+# ============================================================
+
+def test_phase3b_orchestrator_pending_and_wake_retrieval():
+    from pathlib import Path
+    import tempfile
+
+    from core.config import CauvisConfig
+    from core.orchestrator import CauvisOrchestrator
+    from execution.functional_runtime import (
+        build_functional_execution_runtime,
+    )
+    from intelligence.models import ModelResponse
+    from intelligence.retrieval import WebRetrievalRuntime
+    from intelligence.router import AIModelRouter
+    from tools.filesystem_actions import FilesystemActionRuntime
+    from tools.windows_actions import WindowsActionRuntime
+    from tools.windows_known_folders import (
+        WindowsKnownFolderResolver,
+    )
+
+    class FakeBrain:
+        def __init__(self):
+            self.router = AIModelRouter()
+            self.calls = []
+
+        def think(
+            self,
+            user_input,
+            system_prompt=None,
+            provider_name=None,
+        ):
+            self.calls.append(user_input)
+
+            return ModelResponse(
+                text="RETRIEVAL SYNTHESIS",
+                model="fake",
+                provider="fake",
+                success=True,
+            )
+
+    html = """
+    <html><body>
+      <div class="result">
+        <a class="result__a" href="https://example.com/motorcycles">
+          Motorcycles and motorcycle information
+        </a>
+        <a class="result__snippet">
+          Current motorcycle information and motorcycle topics.
+        </a>
+      </div>
+    </body></html>
+    """
+
+    def retrieval_transport(url, headers, timeout):
+        if "duckduckgo.com" in url:
+            return 200, html
+        raise AssertionError("Unexpected retrieval fallback.")
+
+    with tempfile.TemporaryDirectory() as temporary:
+        home = Path(temporary) / "home"
+        project = home / "Cauvis"
+        desktop = home / "OneDrive" / "Desktop"
+
+        project.mkdir(parents=True)
+        desktop.mkdir(parents=True)
+
+        runtime = build_functional_execution_runtime(
+            project_root=project,
+            windows_runtime=WindowsActionRuntime(
+                launcher=lambda command: None,
+                browser_opener=lambda url: True,
+                environment={},
+            ),
+            filesystem_runtime=FilesystemActionRuntime(
+                project_root=project,
+                home=home,
+            ),
+            known_folders=WindowsKnownFolderResolver(
+                home=home,
+                overrides={"desktop": desktop},
+            ),
+        )
+
+        brain = FakeBrain()
+
+        orchestrator = CauvisOrchestrator(
+            CauvisConfig(),
+            enable_ai=True,
+            brain=brain,
+            retrieval_runtime=WebRetrievalRuntime(
+                transport=retrieval_transport,
+                max_results=2,
+            ),
+            functional_execution_runtime=runtime,
+            session_id="phase3b-orchestrator",
+        )
+
+        first = orchestrator.handle(
+            (
+                "Cauvis create a text file called route.txt "
+                "with text routed correctly"
+            )
+        )
+
+        assert first.status == "clarification_required"
+
+        second = orchestrator.handle(
+            "Desktop"
+        )
+
+        assert second.status == "success"
+        assert (desktop / "route.txt").is_file()
+
+        retrieval = orchestrator.handle(
+            (
+                "Cauvis I need you to search the web "
+                "for anything related to motorcycles"
+            )
+        )
+
+        assert retrieval.status == "success"
+        assert retrieval.data["retrieval_performed"] is True
+
+    print("ORCHESTRATOR PENDING RESUME:", True)
+    print("WAKE-PREFIX RETRIEVAL ROUTING:", True)
+
+    return True
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -12510,6 +12982,30 @@ tests = [
     (
         "Phase 3A Local Synthesis + Ollama Bound",
         test_phase3a_local_synthesis_and_ollama_bound,
+    ),
+    (
+        "Phase 3B Command Normalization",
+        test_phase3b_command_normalization,
+    ),
+    (
+        "Phase 3B Windows Known Folders",
+        test_phase3b_windows_known_folders,
+    ),
+    (
+        "Phase 3B Clarification + Pending Action",
+        test_phase3b_clarification_pending_action,
+    ),
+    (
+        "Phase 3B Multi-Action URL Execution",
+        test_phase3b_multi_action_urls,
+    ),
+    (
+        "Phase 3B System Diagnostics",
+        test_phase3b_system_diagnostics,
+    ),
+    (
+        "Phase 3B Orchestrator Pending + Wake Retrieval",
+        test_phase3b_orchestrator_pending_and_wake_retrieval,
     ),
 ]
 

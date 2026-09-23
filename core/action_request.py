@@ -1,6 +1,7 @@
 ﻿from dataclasses import dataclass
 
 from core.routing_language import RoutingLanguageNormalizer
+from core.command_normalizer import CommandNormalizer
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,21 @@ class ActionRequestDetector:
         "look up",
     )
 
+    _DIAGNOSTIC_PATTERNS = (
+        "analyze my pc",
+        "analyse my pc",
+        "analyze my computer",
+        "analyse my computer",
+        "diagnose my pc",
+        "diagnose my computer",
+        "check my pc performance",
+        "check my computer performance",
+        "why is my pc running slow",
+        "why is my computer running slow",
+        "why my pc is running slow",
+        "why my computer is running slow",
+    )
+
     _SYSTEM_VERBS = (
         "open",
         "close",
@@ -244,6 +260,25 @@ class ActionRequestDetector:
         ):
             return self._not_requested(
                 "Request is instructional or informational."
+            )
+
+        # -----------------------------------------------------
+        # READ-ONLY SYSTEM DIAGNOSTICS
+        # -----------------------------------------------------
+
+        if any(
+            pattern in command_text
+            for pattern in self._DIAGNOSTIC_PATTERNS
+        ):
+            return ActionRequest(
+                requested=True,
+                category="system",
+                action="diagnose",
+                required_capability="system_actions",
+                confidence=1.0,
+                reason=(
+                    "Direct read-only PC performance diagnostic request."
+                ),
             )
 
         # -----------------------------------------------------
@@ -502,7 +537,9 @@ class ActionRequestDetector:
         text: str,
     ) -> str:
         return RoutingLanguageNormalizer.normalize(
-            text
+            CommandNormalizer.routing_text(
+                text
+            )
         )
 
     @staticmethod
