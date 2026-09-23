@@ -59,6 +59,10 @@ class OllamaProvider(ModelProvider):
         transport: Transport | None = None,
         timeout_seconds: float = 120.0,
         keep_alive: str | int | float | None = None,
+        provider_name: str | None = None,
+        capabilities: set[str] | None = None,
+        routing_priority: int = 100,
+        think: bool | None = None,
     ):
         model = str(model).strip()
 
@@ -82,7 +86,42 @@ class OllamaProvider(ModelProvider):
                 "Ollama provider base_url must not be empty."
             )
 
+        selected_name = str(
+            provider_name
+            or type(self).name
+        ).strip()
+
+        if not selected_name:
+            raise ValueError(
+                'Ollama provider_name must not be empty.'
+            )
+
+        if isinstance(routing_priority, bool):
+            raise ValueError(
+                'routing_priority must be a non-negative integer.'
+            )
+
+        selected_priority = int(routing_priority)
+
+        if selected_priority < 0:
+            raise ValueError(
+                'routing_priority must be a non-negative integer.'
+            )
+
+        if think is not None and not isinstance(think, bool):
+            raise ValueError(
+                'Ollama think must be bool or None.'
+            )
+
         self.model = model
+        self.name = selected_name
+        self.capabilities = set(
+            type(self).capabilities
+            if capabilities is None
+            else capabilities
+        )
+        self.routing_priority = selected_priority
+        self.think = think
 
         self.base_url = (
             selected_base_url.rstrip("/")
@@ -204,6 +243,9 @@ class OllamaProvider(ModelProvider):
             payload["keep_alive"] = (
                 self.keep_alive
             )
+
+        if self.think is not None:
+            payload["think"] = self.think
 
         headers = {
             "Content-Type": "application/json",

@@ -256,7 +256,7 @@ class AIModelRouter:
         """
 
         ranked: list[
-            tuple[int, int, ModelProvider]
+            tuple[int, int, int, int, ModelProvider]
         ] = []
 
         for registration_index, provider in enumerate(
@@ -276,8 +276,29 @@ class AIModelRouter:
             if runtime_rank is None:
                 continue
 
+            routing_priority = int(
+                getattr(
+                    provider,
+                    "routing_priority",
+                    100,
+                )
+            )
+
+            # AVAILABLE and UNKNOWN are both usable, non-failed
+            # states. Model role priority chooses between them.
+            #
+            # DEGRADED providers remain a fallback tier regardless
+            # of their model routing priority.
+            stability_rank = (
+                1
+                if runtime_rank >= 2
+                else 0
+            )
+
             ranked.append(
                 (
+                    stability_rank,
+                    routing_priority,
                     runtime_rank,
                     registration_index,
                     provider,
@@ -288,11 +309,13 @@ class AIModelRouter:
             key=lambda item: (
                 item[0],
                 item[1],
+                item[2],
+                item[3],
             )
         )
 
         return tuple(
-            item[2]
+            item[4]
             for item in ranked
         )
 

@@ -12748,6 +12748,500 @@ def test_phase3b_orchestrator_pending_and_wake_retrieval():
 
     return True
 
+
+# ============================================================
+# TEST 85 - PHASE 3C OLLAMA MODEL LANES
+# ============================================================
+
+def test_phase3c_ollama_model_lanes():
+    from intelligence.providers.ollama import OllamaProvider
+
+    captured = []
+
+    def fake_transport(
+        url,
+        headers,
+        payload,
+        timeout,
+    ):
+        captured.append(
+            dict(payload)
+        )
+
+        return 200, {
+            "model": payload["model"],
+            "message": {
+                "role": "assistant",
+                "content": "phase3c-test",
+            },
+            "done": True,
+        }
+
+    fast = OllamaProvider(
+        model="qwen3:1.7b",
+        provider_name="ollama_fast",
+        capabilities={
+            "chat",
+            "complexity:low",
+        },
+        routing_priority=10,
+        think=False,
+        transport=fake_transport,
+    )
+
+    strong = OllamaProvider(
+        model="phi4-mini:latest",
+        provider_name="ollama",
+        capabilities={
+            "chat",
+            "code",
+            "reasoning",
+            "complexity:low",
+            "complexity:medium",
+            "complexity:high",
+        },
+        routing_priority=20,
+        transport=fake_transport,
+    )
+
+    fast_response = fast.generate(
+        ModelRequest(
+            prompt="hello",
+        )
+    )
+
+    strong_response = strong.generate(
+        ModelRequest(
+            prompt="analyze this",
+        )
+    )
+
+    assert fast.name == "ollama_fast"
+    assert fast.model == "qwen3:1.7b"
+    assert fast.routing_priority == 10
+    assert fast.think is False
+
+    assert strong.name == "ollama"
+    assert strong.routing_priority == 20
+    assert strong.think is None
+
+    assert fast_response.success is True
+    assert strong_response.success is True
+
+    assert captured[0]["model"] == "qwen3:1.7b"
+    assert captured[0]["think"] is False
+
+    assert captured[1]["model"] == "phi4-mini:latest"
+    assert "think" not in captured[1]
+
+    print("FAST MODEL LANE:", fast.model)
+    print("STRONG MODEL LANE:", strong.model)
+    print("FAST THINK DISABLED:", True)
+
+    return True
+
+
+# ============================================================
+# TEST 86 - PHASE 3C HEALTH + PRIORITY ROUTING
+# ============================================================
+
+def test_phase3c_health_priority_routing():
+    from intelligence.policy import (
+        ExecutionStrategy,
+        IntelligencePolicy,
+    )
+
+    class PriorityProvider(ModelProvider):
+        provider_types = {"local"}
+        credential_required = False
+        enabled = True
+
+        def __init__(
+            self,
+            name,
+            model,
+            capabilities,
+            routing_priority,
+        ):
+            self.name = name
+            self.model = model
+            self.capabilities = set(
+                capabilities
+            )
+            self.routing_priority = (
+                routing_priority
+            )
+
+        def generate(
+            self,
+            request,
+        ):
+            return ModelResponse(
+                text=self.name,
+                model=self.model,
+                provider=self.name,
+                success=True,
+            )
+
+    policy = IntelligencePolicy(
+        strategy=ExecutionStrategy.LOCAL,
+        local_allowed=True,
+        cloud_allowed=False,
+        reason="Phase 3C validation.",
+    )
+
+    strong_capabilities = {
+        "chat",
+        "code",
+        "reasoning",
+        "complexity:low",
+        "complexity:medium",
+        "complexity:high",
+    }
+
+    fast_capabilities = {
+        "chat",
+        "complexity:low",
+    }
+
+    # Equal runtime health:
+    # routing_priority must choose FAST even though
+    # STRONG is deliberately registered first.
+    equal_router = AIModelRouter()
+
+    equal_router.register_provider(
+        PriorityProvider(
+            "strong",
+            "phi4-mini",
+            strong_capabilities,
+            20,
+        )
+    )
+
+    equal_router.register_provider(
+        PriorityProvider(
+            "fast",
+            "qwen3:1.7b",
+            fast_capabilities,
+            10,
+        )
+    )
+
+    low = equal_router.generate(
+        ModelRequest(
+            prompt="hello",
+        ),
+        policy=policy,
+        required_capabilities={
+            "chat",
+            "complexity:low",
+        },
+    )
+
+    assert low.provider == "fast"
+
+    # AVAILABLE and UNKNOWN are both non-failed states.
+    # Model routing priority must therefore keep FAST first,
+    # even when STRONG has already recorded a success.
+    health_router = AIModelRouter()
+
+    health_router.register_provider(
+        PriorityProvider(
+            "strong",
+            "phi4-mini",
+            strong_capabilities,
+            20,
+        )
+    )
+
+    health_router.register_provider(
+        PriorityProvider(
+            "fast",
+            "qwen3:1.7b",
+            fast_capabilities,
+            10,
+        )
+    )
+
+    health_router.provider_runtime.record_success(
+        "strong",
+        latency_ms=25.0,
+    )
+
+    health_first = health_router.generate(
+        ModelRequest(
+            prompt="hello",
+        ),
+        policy=policy,
+        required_capabilities={
+            "chat",
+            "complexity:low",
+        },
+    )
+
+    assert health_first.provider == "fast"
+
+    # A real failure moves FAST to DEGRADED. At that point
+    # healthy STRONG must become the fallback for low tasks.
+    health_router.provider_runtime.record_failure(
+        "fast",
+        error="phase3c simulated fast-lane failure",
+    )
+
+    degraded_fast = health_router.generate(
+        ModelRequest(
+            prompt="hello again",
+        ),
+        policy=policy,
+        required_capabilities={
+            "chat",
+            "complexity:low",
+        },
+    )
+
+    assert degraded_fast.provider == "strong"
+
+    # Capability matching must exclude FAST for a
+    # medium reasoning task.
+    capability_router = AIModelRouter()
+
+    capability_router.register_provider(
+        PriorityProvider(
+            "strong",
+            "phi4-mini",
+            strong_capabilities,
+            20,
+        )
+    )
+
+    capability_router.register_provider(
+        PriorityProvider(
+            "fast",
+            "qwen3:1.7b",
+            fast_capabilities,
+            10,
+        )
+    )
+
+    medium = capability_router.generate(
+        ModelRequest(
+            prompt="explain this",
+        ),
+        policy=policy,
+        required_capabilities={
+            "chat",
+            "reasoning",
+            "complexity:medium",
+        },
+    )
+
+    assert medium.provider == "strong"
+
+    print("LOW PRIORITY ROUTE:", low.provider)
+    print("AVAILABLE/UNKNOWN PRIORITY ROUTE:", health_first.provider)
+    print("DEGRADED FAST FALLBACK:", degraded_fast.provider)
+    print("MEDIUM CAPABILITY ROUTE:", medium.provider)
+
+    return True
+
+
+# ============================================================
+# TEST 87 - PHASE 3C ORCHESTRATOR MODEL CONFIGURATION
+# ============================================================
+
+def test_phase3c_orchestrator_model_configuration():
+    default_runtime = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        environment={},
+    )
+
+    provider_names = (
+        default_runtime.router.list_providers()
+    )
+
+    assert "ollama" in provider_names
+    assert "ollama_fast" in provider_names
+
+    strong = (
+        default_runtime.router.get_provider(
+            "ollama"
+        )
+    )
+
+    fast = (
+        default_runtime.router.get_provider(
+            "ollama_fast"
+        )
+    )
+
+    assert strong is not None
+    assert fast is not None
+
+    assert strong.model == "phi4-mini"
+    assert strong.routing_priority == 20
+
+    assert fast.model == "qwen3:1.7b"
+    assert fast.routing_priority == 10
+    assert fast.think is False
+
+    assert "complexity:low" in (
+        fast.capabilities
+    )
+
+    assert "complexity:medium" not in (
+        fast.capabilities
+    )
+
+    assert "complexity:high" not in (
+        fast.capabilities
+    )
+
+    # Legacy CAUVIS_OLLAMA_MODEL must remain a valid
+    # alias for the strong local model.
+    legacy_runtime = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        environment={
+            "CAUVIS_OLLAMA_MODEL":
+                "legacy-strong-model",
+        },
+    )
+
+    legacy_strong = (
+        legacy_runtime.router.get_provider(
+            "ollama"
+        )
+    )
+
+    legacy_fast = (
+        legacy_runtime.router.get_provider(
+            "ollama_fast"
+        )
+    )
+
+    assert legacy_strong.model == (
+        "legacy-strong-model"
+    )
+
+    assert legacy_fast.model == (
+        "qwen3:1.7b"
+    )
+
+    # New explicit settings must override the legacy
+    # strong alias independently.
+    explicit_runtime = CauvisOrchestrator(
+        CauvisConfig(),
+        enable_ai=True,
+        environment={
+            "CAUVIS_OLLAMA_MODEL":
+                "legacy-model",
+            "CAUVIS_OLLAMA_STRONG_MODEL":
+                "explicit-strong",
+            "CAUVIS_OLLAMA_FAST_MODEL":
+                "explicit-fast",
+        },
+    )
+
+    explicit_strong = (
+        explicit_runtime.router.get_provider(
+            "ollama"
+        )
+    )
+
+    explicit_fast = (
+        explicit_runtime.router.get_provider(
+            "ollama_fast"
+        )
+    )
+
+    assert explicit_strong.model == (
+        "explicit-strong"
+    )
+
+    assert explicit_fast.model == (
+        "explicit-fast"
+    )
+
+    # Multi-model deterministic status must describe the
+    # available routes rather than claiming that one model
+    # generated the status response.
+    runtime_status = default_runtime.handle(
+        "What AI model are you using right now?"
+    )
+
+    assert runtime_status.status == "success"
+
+    assert (
+        "multiple eligible AI routes"
+        in runtime_status.message
+    )
+
+    assert "ollama" in runtime_status.message
+    assert "phi4-mini" in runtime_status.message
+    assert "ollama_fast" in runtime_status.message
+    assert "qwen3:1.7b" in runtime_status.message
+
+    assert (
+        "selects among these routes dynamically"
+        in runtime_status.message
+    )
+
+    assert runtime_status.data["provider"] is None
+    assert runtime_status.data["model"] is None
+
+    assert (
+        runtime_status.data["telemetry"][
+            "model_called"
+        ]
+        is False
+    )
+
+    spanish_status = default_runtime.handle(
+        "¿Qué modelo de IA estás usando ahora mismo?"
+    )
+
+    assert spanish_status.status == "success"
+
+    assert (
+        "múltiples rutas de IA elegibles"
+        in spanish_status.message
+    )
+
+    assert "ollama_fast" in spanish_status.message
+    assert "qwen3:1.7b" in spanish_status.message
+
+    assert (
+        spanish_status.data["telemetry"][
+            "model_called"
+        ]
+        is False
+    )
+
+    print(
+        "DEFAULT FAST MODEL:",
+        fast.model,
+    )
+
+    print(
+        "DEFAULT STRONG MODEL:",
+        strong.model,
+    )
+
+    print(
+        "LEGACY STRONG COMPATIBILITY:",
+        legacy_strong.model,
+    )
+
+    print(
+        "EXPLICIT FAST / STRONG:",
+        explicit_fast.model,
+        "/",
+        explicit_strong.model,
+    )
+
+    return True
+
 tests = [
     ("Compilation", test_compilation),
     ("Core", test_core),
@@ -13006,6 +13500,18 @@ tests = [
     (
         "Phase 3B Orchestrator Pending + Wake Retrieval",
         test_phase3b_orchestrator_pending_and_wake_retrieval,
+    ),
+    (
+        "Phase 3C Ollama Model Lanes",
+        test_phase3c_ollama_model_lanes,
+    ),
+    (
+        "Phase 3C Health + Priority Routing",
+        test_phase3c_health_priority_routing,
+    ),
+    (
+        "Phase 3C Orchestrator Model Configuration",
+        test_phase3c_orchestrator_model_configuration,
     ),
 ]
 

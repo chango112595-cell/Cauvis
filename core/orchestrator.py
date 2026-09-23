@@ -333,6 +333,18 @@ class CauvisOrchestrator:
                 "Cauvis's current eligible AI model is ",
                 "El modelo de IA elegible actual de Cauvis es ",
             ),
+            (
+                "Cauvis currently has multiple eligible AI routes: ",
+                "Cauvis tiene actualmente múltiples rutas de IA "
+                "elegibles: ",
+            ),
+            (
+                "Cauvis selects among these routes dynamically based "
+                "on task requirements, policy, and runtime health.",
+                "Cauvis selecciona dinámicamente entre estas rutas "
+                "según los requisitos de la tarea, la política y el "
+                "estado del entorno.",
+            ),
             ("using model ", "usando el modelo "),
             (
                 "This runtime-status response did not call that AI model.",
@@ -1425,6 +1437,63 @@ class CauvisOrchestrator:
         return candidates[0][2]
 
 
+    def _eligible_ai_providers(
+        self,
+    ):
+        """
+        Return every configured, runtime-eligible AI provider.
+
+        This is used for deterministic runtime-status truth.
+        It does not generate a model response and does not claim
+        that any one provider handled the current status turn.
+        """
+
+        if self.router is None:
+            return ()
+
+        providers = []
+
+        for provider_name in self.router.list_providers():
+            configuration = (
+                self.router.get_provider_configuration(
+                    provider_name
+                )
+            )
+
+            if not (
+                configuration is not None
+                and configuration.enabled
+                and configuration.configured
+            ):
+                continue
+
+            health = (
+                self.router.provider_runtime.get_health(
+                    provider_name
+                )
+            )
+
+            if (
+                health is None
+                or health.status.value
+                not in {
+                    "available",
+                    "unknown",
+                    "degraded",
+                }
+            ):
+                continue
+
+            provider = self.router.get_provider(
+                provider_name
+            )
+
+            if provider is not None:
+                providers.append(provider)
+
+        return tuple(providers)
+
+
     def _select_current_ai_provider(
         self,
     ):
@@ -1553,8 +1622,20 @@ class CauvisOrchestrator:
             user_input
         )
 
+        eligible_providers = (
+            self._eligible_ai_providers()
+        )
+
+        # A single eligible provider can truthfully be reported
+        # with the original deterministic status wording.
+        #
+        # With multiple eligible providers, no one model generated
+        # this deterministic status response, so provider/model
+        # metadata remains unset and the routes are reported as a set.
         provider = (
-            self._select_current_ai_provider()
+            eligible_providers[0]
+            if len(eligible_providers) == 1
+            else None
         )
 
         provider_name = (
@@ -1619,7 +1700,67 @@ class CauvisOrchestrator:
         )
 
         if asks_model or asks_provider:
-            if provider is not None:
+            if len(eligible_providers) > 1:
+                route_descriptions = []
+
+                for eligible_provider in eligible_providers:
+                    eligible_provider_name = str(
+                        getattr(
+                            eligible_provider,
+                            "name",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    eligible_model_name = str(
+                        getattr(
+                            eligible_provider,
+                            "model",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    if (
+                        eligible_provider_name
+                        and eligible_model_name
+                    ):
+                        route_descriptions.append(
+                            f"{eligible_provider_name} using model "
+                            f"{eligible_model_name}"
+                        )
+
+                    elif eligible_provider_name:
+                        route_descriptions.append(
+                            eligible_provider_name
+                        )
+
+                    elif eligible_model_name:
+                        route_descriptions.append(
+                            f"model {eligible_model_name}"
+                        )
+
+                if route_descriptions:
+                    parts.append(
+                        "Cauvis currently has multiple eligible AI "
+                        "routes: "
+                        + "; ".join(route_descriptions)
+                        + "."
+                    )
+
+                    parts.append(
+                        "Cauvis selects among these routes dynamically "
+                        "based on task requirements, policy, and "
+                        "runtime health."
+                    )
+
+                parts.append(
+                    "This runtime-status response did not call "
+                    "an AI model."
+                )
+
+            elif provider is not None:
                 if model_name and provider_name:
                     parts.append(
                         "Cauvis's current eligible AI provider is "
@@ -2774,15 +2915,35 @@ class CauvisOrchestrator:
         master test suite never depends on a live API or network.
         """
 
-        ollama_model = str(
+        legacy_ollama_model = str(
             self.environment.get(
                 "CAUVIS_OLLAMA_MODEL",
                 "",
             )
         ).strip()
 
-        if not ollama_model:
-            ollama_model = "phi4-mini"
+        ollama_strong_model = str(
+            self.environment.get(
+                "CAUVIS_OLLAMA_STRONG_MODEL",
+                "",
+            )
+        ).strip()
+
+        if not ollama_strong_model:
+            ollama_strong_model = (
+                legacy_ollama_model
+                or "phi4-mini"
+            )
+
+        ollama_fast_model = str(
+            self.environment.get(
+                "CAUVIS_OLLAMA_FAST_MODEL",
+                "",
+            )
+        ).strip()
+
+        if not ollama_fast_model:
+            ollama_fast_model = "qwen3:1.7b"
 
         ollama_base_url = str(
             self.environment.get(
@@ -2822,16 +2983,45 @@ class CauvisOrchestrator:
             )
         )
 
-        # Register local AI first so Cauvis has a real
-        # credential-free default provider.
+        # Preserve the original local provider identity for
+        # compatibility. This is the strong/balanced lane.
         ollama_provider = OllamaProvider(
-            model=ollama_model,
+            model=ollama_strong_model,
             base_url=ollama_base_url,
             keep_alive=ollama_keep_alive,
+            provider_name="ollama",
+            capabilities={
+                "chat",
+                "code",
+                "reasoning",
+                "complexity:low",
+                "complexity:medium",
+                "complexity:high",
+            },
+            routing_priority=20,
         )
 
         self.router.register_provider(
             ollama_provider
+        )
+
+        # Fast local lane for low-complexity conversational turns.
+        # Qwen3 thinking is disabled here to minimize latency.
+        ollama_fast_provider = OllamaProvider(
+            model=ollama_fast_model,
+            base_url=ollama_base_url,
+            keep_alive=ollama_keep_alive,
+            provider_name="ollama_fast",
+            capabilities={
+                "chat",
+                "complexity:low",
+            },
+            routing_priority=10,
+            think=False,
+        )
+
+        self.router.register_provider(
+            ollama_fast_provider
         )
 
         # Cloud AI remains available when configured and can

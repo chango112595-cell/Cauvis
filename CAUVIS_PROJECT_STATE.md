@@ -8300,3 +8300,213 @@ Compatibility repairs completed before publication:
 - Sandboxed runtimes now keep Desktop, Documents, and Downloads inside the explicitly injected filesystem home; normal Cauvis runtime continues resolving real Windows / OneDrive known folders.
 - Filesystem security boundaries were not weakened.
 - Phase 3A execution compatibility remains preserved.
+
+---
+
+# 2026-09-23 CHECKPOINT — PHASE 3C FAST MULTI-MODEL ROUTING
+
+## Status
+
+**Phase 3C fast multi-model routing is COMPLETE AND VALIDATED.**
+
+```text
+PASSED:  87
+FAILED:  0
+TOTAL:   87
+STATUS: ALL TESTS PASSED
+```
+
+## Local Model Architecture
+
+FAST lane:
+
+```text
+provider: ollama_fast
+model: qwen3:1.7b
+routing_priority: 10
+think: False
+capabilities: chat, complexity:low
+```
+
+STRONG lane:
+
+```text
+provider: ollama
+model: phi4-mini
+routing_priority: 20
+capabilities: chat, code, reasoning, complexity:low/medium/high
+```
+
+The original `ollama` provider identity remains for backward compatibility.
+
+## Benchmark + Live Results
+
+Direct warm benchmark:
+
+```text
+qwen3:1.7b      ~1601 ms   ~24.75 tokens/sec
+phi4-mini       ~2377 ms   ~12.73 tokens/sec
+```
+
+Later real Cauvis routing:
+
+```text
+HIGH first                     -> ollama / phi4-mini
+LOW after STRONG was healthy   -> ollama_fast / qwen3:1.7b
+LOW with both healthy          -> ollama_fast / qwen3:1.7b
+HIGH with both healthy         -> ollama / phi4-mini
+```
+
+Result:
+
+```text
+PHASE 3C LIVE ROUTING ORDER: PASS
+```
+
+Observed later Qwen low-turn latency was about 1108-1205 ms.
+Observed Phi high-turn latency was about 5205-8425 ms.
+Latency remains hardware/model/prompt dependent.
+
+## OllamaProvider Upgrade
+
+`intelligence/providers/ollama.py` now supports per-instance:
+
+```text
+provider_name
+capabilities
+routing_priority
+think
+```
+
+Qwen3 uses `think=False`.
+Phi retains prior behavior with no explicit `think` field.
+
+## Configuration
+
+New environment variables:
+
+```text
+CAUVIS_OLLAMA_FAST_MODEL
+CAUVIS_OLLAMA_STRONG_MODEL
+```
+
+Defaults:
+
+```text
+FAST=qwen3:1.7b
+STRONG=phi4-mini
+```
+
+Legacy `CAUVIS_OLLAMA_MODEL` remains supported as the strong-model setting when `CAUVIS_OLLAMA_STRONG_MODEL` is absent.
+
+## Router Behavior
+
+Routing now combines provider configuration, runtime eligibility, capability matching, role priority, health, and registration order.
+
+Important rule:
+
+```text
+AVAILABLE + UNKNOWN -> usable non-failed tier
+within that tier    -> routing_priority selects model role
+DEGRADED            -> fallback tier
+UNAVAILABLE/DISABLED-> excluded
+```
+
+This prevents a previously-used STRONG model from permanently taking simple turns away from FAST.
+
+## Deterministic Runtime Truth
+
+`What AI model are you using right now?` now reports all eligible routes instead of falsely claiming one current model.
+
+Example runtime truth:
+
+```text
+Cauvis currently has multiple eligible AI routes:
+ollama using model phi4-mini;
+ollama_fast using model qwen3:1.7b.
+
+Cauvis selects among these routes dynamically based on task requirements, policy, and runtime health.
+
+This runtime-status response did not call an AI model.
+```
+
+Metadata for this deterministic status path:
+
+```text
+provider = None
+model = None
+model_called = False
+```
+
+Single-provider runtimes retain the prior wording.
+Spanish multi-model deterministic status is also supported.
+
+## Permanent Validation
+
+Added permanent tests:
+
+```text
+85 — Phase 3C Ollama Model Lanes
+86 — Phase 3C Health + Priority Routing
+87 — Phase 3C Orchestrator Model Configuration
+```
+
+Test 87 also protects legacy model configuration compatibility, explicit FAST/STRONG configuration, and multi-model deterministic status truth.
+
+Final baseline:
+
+```text
+87 / 87 PASS
+```
+
+## Intentional Production Files
+
+```text
+core/orchestrator.py
+intelligence/providers/ollama.py
+intelligence/router.py
+validate_cauvis.py
+CAUVIS_PROJECT_STATE.md
+```
+
+Temporary patch scripts, backups, live probes, and older Fix 8/9/10 development files remain development-only.
+
+Do not use `git add .`.
+
+## Exact Resume Point
+
+Next milestone:
+
+```text
+PHASE 3C — CHANGO VOICE FOUNDATION
+```
+
+Order:
+
+```text
+1. STT foundation
+2. TTS foundation
+3. voice state machine
+4. VAD
+5. wake word
+6. interruption / barge-in
+7. anti-self-listening
+8. diagnostics / recovery
+```
+
+Architectural rule:
+
+```text
+Microphone / STT
+      ↓
+existing Cauvis brain
+      ↓
+existing FAST / STRONG routing
+      ↓
+existing execution / permission / verification
+      ↓
+TTS
+```
+
+Voice remains an I/O layer around the existing Cauvis intelligence.
+Do not build a separate voice brain.
